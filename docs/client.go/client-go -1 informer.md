@@ -71,9 +71,7 @@ type Event struct {
 
 一个控制器每次需要获取对象的时候都要访问 APIServer，这会给系统带来很高的负载，Informers 的内存缓存就是来解决这个问题的，此外 Informers 还可以几乎实时的监控对象的变化，而不需要轮询请求，这样就可以保证客户端的缓存数据和服务端的数据一致，就可以大大降低 APIServer 的压力了。
 
-![informer](F:\docs\docs\images\informer.png)
-
-
+![informer](https://github.com/wenchajun/docs/blob/master/docs/images/informer.png)
 
 如上图展示了 Informer 的基本处理流程：
 
@@ -93,7 +91,7 @@ Informers 的这些高级特性以及超强的鲁棒性，都足以让我们不�
 
 #### 示例
 
-首先我们创建一个 Clientset 对象，然后使用 Clientset 来创建一个共享的 Informer 工厂，Informer 是通过 `informer-gen` 这个代码生成器工具自动生成的，位于 `k8s.io/client-go/informers` 中。
+首先我们创建一个 Clientset 对象（-->clientset就是上次说的四种clientset），然后使用 Clientset 来创建一个共享的 Informer 工厂，Informer 是通过 `informer-gen` 这个代码生成器工具自动生成的，位于 `k8s.io/client-go/informers` 中。
 
 这里我们来创建一个用于获取 Deployment 的共享 Informer，代码如下所示：
 
@@ -221,9 +219,37 @@ add a deployment: code-server
 
 Informers 是 client-go 中非常重要的概念，接下来我们将仔细分析 Informers 的实现原理，由于 Informers 实现非常复杂，我们将按照 Informers 的几个核心知识点分别进行讲解。
 
+## Controller
 
+**Informer** 通过一个 **controller** 对象来定义，本身很简单，长这样：
 
+- **client-go/tools/cache/controller.go:89**
 
+```go
+
+type controller struct {
+   config         Config
+   reflector      *Reflector
+   reflectorMutex sync.RWMutex
+   clock          clock.Clock
+}
+
+```
+
+这里有我们熟悉的 **Reflector**(将在下一节讲到)，可以猜到 Informer 启动的时候会去运行 Reflector，从而通过 Reflector 实现 list-watch apiserver，更新“事件”到 DeltaFIFO 中用于进一步处理。Config 对象等会再看，我们继续看下 controller 对应的接口：
+
+```go
+type Controller interface {
+   Run(stopCh <-chan struct{})
+   HasSynced() bool
+   LastSyncResourceVersion() string
+}
+```
+
+这里的核心明显是 `Run(stopCh <-chan struct{})` 方法，Run 负责两件事情：
+
+1. 构造 Reflector 利用 ListerWatcher 的能力将对象事件更新到 DeltaFIFO；
+2. 从 DeltaFIFO 中 Pop 对象然后调用 ProcessFunc 来处理；
 
 
 
