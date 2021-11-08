@@ -251,6 +251,65 @@ type Controller interface {
 1. 构造 Reflector 利用 ListerWatcher 的能力将对象事件更新到 DeltaFIFO；
 2. 从 DeltaFIFO 中 Pop 对象然后调用 ProcessFunc 来处理；
 
+### Controller 的初始化
+
+Controller 的 New 方法很简单：
+
+- **client-go/tools/cache/controller.go:116**
+
+```
+func New(c *Config) Controller {
+   ctlr := &controller{
+      config: *c,
+      clock:  &clock.RealClock{},
+   }
+   return ctlr
+}
+```
+
+这里没有太多的逻辑，主要是传递了一个 Config 进来，可以猜到核心逻辑是 Config 从何而来以及后面如何使用。我们先向上跟一下 Config 从哪里来，New() 的调用有几个地方，我们不去看 `newInformer()` 分支的代码，因为实际开发中主要是使用 **SharedIndexInformer**(这里的原因可以看上面，共享informer)，两个入口初始化 Controller 的逻辑类似，我们直接跟更实用的一个分支，看 `func (s *sharedIndexInformer) Run(stopCh <-chan struct{})` 方法中如何调用的 `New()`：
+
+```go
+func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
+	// ……
+	fifo := NewDeltaFIFOWithOptions(DeltaFIFOOptions{
+		KnownObjects:          s.indexer,
+		EmitDeltaTypeReplaced: true,
+	})
+
+	cfg := &Config{
+		Queue:            fifo,
+		ListerWatcher:    s.listerWatcher,
+		ObjectType:       s.objectType,
+		FullResyncPeriod: s.resyncCheckPeriod,
+		RetryOnError:     false,
+		ShouldResync:     s.processor.shouldResync,
+
+		Process:           s.HandleDeltas,
+		WatchErrorHandler: s.watchErrorHandler,
+	}
+
+	func() {
+		s.startedLock.Lock()
+		defer s.startedLock.Unlock()
+
+		s.controller = New(cfg)
+		s.controller.(*controller).clock = s.clock
+		s.started = true
+	}()
+  // ……
+	s.controller.Run(stopCh)
+}
+
+
+```
+
+上面只保留了主要代码，我们后面会分析 SharedIndexInformer，所以这里先不纠结 SharedIndexInformer 的细节，我们从这里可以看到 SharedIndexInformer 的 Run() 过程里会构造一个 Config，然后创建 Controller，最后调用 Controller 的 Run() 方法。另外这里也可以看到我们前面系列文章里分析过的 DeltaFIFO、ListerWatcher 等，这里还有一个比较重要的是 `Process:s.HandleDeltas,` 这一行，Process 属性的类型是 ProcessFunc，这里可以看到具体的 ProcessFunc 是 HandleDeltas 方法。
+
+
+
+
+
 
 
 参考 
