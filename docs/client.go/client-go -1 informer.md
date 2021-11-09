@@ -285,7 +285,7 @@ func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
 		RetryOnError:     false,
 		ShouldResync:     s.processor.shouldResync,
 
-		Process:           s.HandleDeltas,
+		Process:           s.HandleDeltas,//Process 属性的类型是 ProcessFunc，这里可以看到具体的 ProcessFunc 是 HandleDeltas 方法
 		WatchErrorHandler: s.watchErrorHandler,
 	}
 
@@ -293,18 +293,235 @@ func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
 		s.startedLock.Lock()
 		defer s.startedLock.Unlock()
 
-		s.controller = New(cfg)
+		s.controller = New(cfg)//构造controller
 		s.controller.(*controller).clock = s.clock
 		s.started = true
 	}()
   // ……
-	s.controller.Run(stopCh)
+	s.controller.Run(stopCh)//run方法
 }
 
 
 ```
 
-上面只保留了主要代码，我们后面会分析 SharedIndexInformer，所以这里先不纠结 SharedIndexInformer 的细节，我们从这里可以看到 SharedIndexInformer 的 Run() 过程里会构造一个 Config，然后创建 Controller，最后调用 Controller 的 Run() 方法。另外这里也可以看到我们前面系列文章里分析过的 DeltaFIFO、ListerWatcher 等，这里还有一个比较重要的是 `Process:s.HandleDeltas,` 这一行，Process 属性的类型是 ProcessFunc，这里可以看到具体的 ProcessFunc 是 HandleDeltas 方法。
+上面只保留了主要代码，我们后面会分析 SharedIndexInformer，所以这里先不纠结 SharedIndexInformer 的细节，我们从这里可以看到 SharedIndexInformer 的 Run() 过程里会构造一个 Config，然后创建 Controller，最后调用 Controller 的 Run() 方法。另外这里也可以看到 DeltaFIFO、ListerWatcher 等，这里还有一个比较重要的是 `Process:s.HandleDeltas,` 这一行，Process 属性的类型是 ProcessFunc，这里可以看到具体的 ProcessFunc 是 HandleDeltas 方法。
+
+### Controller 的启动
+
+上面提到 Controller 的初始化本身没有太多的逻辑，主要是构造了一个 Config 对象传递进来，所以 Controller 启动的时候肯定会有这个 Config 的使用逻辑，我们具体来看：
+
+- **client-go/tools/cache/controller.go:127**
+
+```go
+func (c *controller) Run(stopCh <-chan struct{}) {
+   defer utilruntime.HandleCrash()
+   go func() {
+      <-stopCh
+      c.config.Queue.Close()
+   }()
+   // 利用 Config 里的配置构造 Reflector
+   r := NewReflector(
+      c.config.ListerWatcher,
+      c.config.ObjectType,
+      c.config.Queue,
+      c.config.FullResyncPeriod,
+   )
+   r.ShouldResync = c.config.ShouldResync
+   r.WatchListPageSize = c.config.WatchListPageSize
+   r.clock = c.clock
+   if c.config.WatchErrorHandler != nil {
+      r.watchErrorHandler = c.config.WatchErrorHandler
+   }
+
+   c.reflectorMutex.Lock()
+   c.reflector = r
+   c.reflectorMutex.Unlock()
+
+   var wg wait.Group
+   // 启动 Reflector
+   wg.StartWithChannel(stopCh, r.Run)
+   // 执行 Controller 的 processLoop
+   wait.Until(c.processLoop, time.Second, stopCh)
+   wg.Wait()
+}
+```
+
+这里的逻辑很简单，构造 Reflector 后运行起来，然后执行 `c.processLoop`，所以很明显，Controller 的业务逻辑肯定隐藏在 processLoop 方法里，我们继续来看。
+
+### processLoop
+
+- **client-go/tools/cache/controller.go:181**
+
+```go
+func (c *controller) processLoop() {
+   for {
+      obj, err := c.config.Queue.Pop(PopProcessFunc(c.config.Process))
+      if err != nil {//失败了再加
+         if err == ErrFIFOClosed {
+            return
+         }
+         if c.config.RetryOnError {
+            c.config.Queue.AddIfNotPresent(obj)
+         }
+      }
+   }
+}
+```
+
+这里的逻辑是从 DeltaFIFO 中 Pop 出一个对象丢给 PopProcessFunc 处理，如果失败了就 re-enqueue 到 DeltaFIFO 中。我们前面提到过这里的 PopProcessFunc 实现是 `HandleDeltas()` 方法（在contronller初始化中提到的），所以这里的主要逻辑就转到了 `HandleDeltas()` 是如何实现的了。
+
+### HandleDeltas()
+
+这里我们先回顾下 DeltaFIFO 的存储结构，看下这个图：
+
+![DeltaFIFO结构体](F:\docs\docs\images\DeltaFIFO结构体.png)
+
+然后再看源码，这里的逻辑主要是遍历一个 Deltas 里的所有 Delta，然后根据 Delta 的类型来决定如何操作 Indexer，也就是更新本地 cache，同时分发相应的通知。
+
+**client-go/tools/cache/shared_informer.go:537**
+
+```go
+func (s *sharedIndexInformer) HandleDeltas(obj interface{}) error {
+   s.blockDeltas.Lock()
+   defer s.blockDeltas.Unlock()
+   // 对于每个 Deltas 来说，里面存了很多的 Delta，也就是对应不同 Type 的多个 Object，这里的遍历会从旧往新走
+   for _, d := range obj.(Deltas) {
+      switch d.Type {
+      // 除了 Deleted 外所有情况
+      case Sync, Replaced, Added, Updated:
+         // 记录变更，没有太多实际作用
+         s.cacheMutationDetector.AddObject(d.Object)
+         // 通过 indexer 从 cache 里查询当前 Object，如果存在
+         if old, exists, err := s.indexer.Get(d.Object); err == nil && exists {
+            // 更新 indexer 里的对象
+            if err := s.indexer.Update(d.Object); err != nil {
+               return err
+            }
+
+            isSync := false
+            switch {
+            case d.Type == Sync:
+               isSync = true
+            case d.Type == Replaced:
+               if accessor, err := meta.Accessor(d.Object); err == nil {
+                  if oldAccessor, err := meta.Accessor(old); err == nil {
+                     isSync = accessor.GetResourceVersion() == oldAccessor.GetResourceVersion()
+                  }
+               }
+            }
+            // 分发一个更新通知
+            s.processor.distribute(updateNotification{oldObj: old, newObj: d.Object}, isSync)
+           // 如果本地 cache 里没有这个 Object，则添加
+         } else {
+            if err := s.indexer.Add(d.Object); err != nil {
+               return err
+            }
+            // 分发一个新增通知
+            s.processor.distribute(addNotification{newObj: d.Object}, false)
+         }
+        // 如果是删除操作，则从 indexer 里删除这个 Object，然后分发一个删除通知
+      case Deleted:
+         if err := s.indexer.Delete(d.Object); err != nil {
+            return err
+         }
+         s.processor.distribute(deleteNotification{oldObj: d.Object}, false)
+      }
+   }
+   return nil
+}
+```
+
+这里涉及到一个知识点：`s.processor.distribute(addNotification{newObj: d.Object}, false)` 中 processor 是什么？如何分发通知的？谁来接收通知？
+
+我们回到 ProcessFunc 的实现上，除了 **sharedIndexInformer** 的 `HandleDeltas()` 方法外，还有一个基础版本：
+
+- **client-go/tools/cache/controller.go:446**
+
+```go
+		Process: func(obj interface{}) error {
+			for _, d := range obj.(Deltas) {
+				obj := d.Object
+				if transformer != nil {
+					var err error
+					obj, err = transformer(obj)
+					if err != nil {
+						return err
+					}
+				}
+
+				switch d.Type {
+				case Sync, Replaced, Added, Updated:
+					if old, exists, err := clientState.Get(obj); err == nil && exists {
+						if err := clientState.Update(obj); err != nil {
+							return err
+						}
+						h.OnUpdate(old, obj)
+					} else {
+						if err := clientState.Add(obj); err != nil {
+							return err
+						}
+						h.OnAdd(obj)
+					}
+				case Deleted:
+					if err := clientState.Delete(obj); err != nil {
+						return err
+					}
+					h.OnDelete(obj)
+				}
+			}
+			return nil
+		},
+```
+
+这里可以看到逻辑简单很多，除了更新 cache 外，调用了 `h.OnAdd(obj)/h.OnUpdate(old, obj)/h.OnDelete(obj)` 等方法，这里的 h 是 ResourceEventHandler 类型的，也就是 Process 过程直接调用了 ResourceEventHandler 的相应方法，这样就已经逻辑闭环了，ResourceEventHandler 的这几个方法里做一些简单的过滤后，会将这些对象的 key 丢到 workqueue，进而就触发了自定义调谐函数的运行。
+
+换言之，sharedIndexInformer 中实现的 ProcessFunc 是一个进阶版本，不满足于简单调用 ResourceEventHandler 对应方法来完成 Process 逻辑，所以到这里基础的 Informer 逻辑已经闭环了，我们后面继续来看 sharedIndexInformer 中又对 Informer 做了哪些“增强”
+
+## SharedIndexInformer
+
+我们在 Operator 开发中，如果不使用 controller-runtime 库，也就是不通过 Kubebuilder 等工具来生成脚手架时，经常会用到 SharedInformerFactory，比如典型的 sample-controller 中的 main() 函数：
+
+- **sample-controller/main.go:40**
+
+```go
+func main() {
+	klog.InitFlags(nil)
+	flag.Parse()
+
+	stopCh := signals.SetupSignalHandler()
+
+	cfg, err := clientcmd.BuildConfigFromFlags(masterURL, kubeconfig)
+	if err != nil {
+		klog.Fatalf("Error building kubeconfig: %s", err.Error())
+	}
+
+	kubeClient, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		klog.Fatalf("Error building kubernetes clientset: %s", err.Error())
+	}
+
+	exampleClient, err := clientset.NewForConfig(cfg)
+	if err != nil {
+		klog.Fatalf("Error building example clientset: %s", err.Error())
+	}
+
+	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, time.Second*30)
+	exampleInformerFactory := informers.NewSharedInformerFactory(exampleClient, time.Second*30)
+
+	controller := NewController(kubeClient, exampleClient,
+		kubeInformerFactory.Apps().V1().Deployments(),
+		exampleInformerFactory.Samplecontroller().V1alpha1().Foos())
+
+	kubeInformerFactory.Start(stopCh)
+	exampleInformerFactory.Start(stopCh)
+
+	if err = controller.Run(2, stopCh); err != nil {
+		klog.Fatalf("Error running controller: %s", err.Error())
+	}
+}
+```
+
+
 
 
 
