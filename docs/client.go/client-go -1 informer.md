@@ -521,11 +521,54 @@ func main() {
 }
 ```
 
+这里可以看到我们依赖于 `kubeInformerFactory.Apps().V1().Deployments() `提供一个 Informer，这里的 `Deployments()` 方法返回的是一个 **DeploymentInformer** 类型，DeploymentInformer 是什么呢？如下
 
+- **client-go/informers/apps/v1/deployment.go:37**
 
+```
+type DeploymentInformer interface {
+	Informer() cache.SharedIndexInformer
+	Lister() v1.DeploymentLister
+}
+```
 
+可以看到所谓的 DeploymentInformer 由 “Informer” 和 “Lister” 组成，也就是说我们编码时用到的 Informer 本质就是一个 **SharedIndexInformer**
 
+- **client-go/tools/cache/shared_informer.go:186**
 
+```
+type SharedIndexInformer interface {
+   SharedInformer
+   AddIndexers(indexers Indexers) error
+   GetIndexer() Indexer
+}
+```
+
+这里的 Indexer 就很熟悉了，SharedInformer 又是啥呢？
+
+- **client-go/tools/cache/shared_informer.go:133**
+
+```
+
+type SharedInformer interface {
+   // 可以添加自定义的 ResourceEventHandler
+   AddEventHandler(handler ResourceEventHandler)
+   // 附带 resync 间隔配置，设置为 0 表示不关心 resync
+   AddEventHandlerWithResyncPeriod(handler ResourceEventHandler, resyncPeriod time.Duration)
+   // 这里的 Store 指的是 Indexer
+   GetStore() Store
+   // 过时了，没有用
+   GetController() Controller
+   // 通过 Run 来启动
+   Run(stopCh <-chan struct{})
+   // 这里和 resync 逻辑没有关系，表示 Indexer 至少更新过一次全量的对象
+   HasSynced() bool
+   // 最后一次拿到的 RV
+   LastSyncResourceVersion() string
+   // 用于每次 ListAndWatch 连接断开时回调，主要就是日志记录的作用
+   SetWatchErrorHandler(handler WatchErrorHandler) error
+}
+```
 
 
 
