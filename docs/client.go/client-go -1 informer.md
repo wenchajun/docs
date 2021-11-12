@@ -509,7 +509,7 @@ func main() {
 	exampleInformerFactory := informers.NewSharedInformerFactory(exampleClient, time.Second*30)
 
 	controller := NewController(kubeClient, exampleClient,
-		kubeInformerFactory.Apps().V1().Deployments(),
+		kubeInformerFactory.Apps().V1().Deployments(),//提供informer，会返回DeploymentInformer 类型
 		exampleInformerFactory.Samplecontroller().V1alpha1().Foos())
 
 	kubeInformerFactory.Start(stopCh)
@@ -544,7 +544,7 @@ type SharedIndexInformer interface {
 }
 ```
 
-这里的 Indexer 就很熟悉了，SharedInformer 又是啥呢？
+这里的 Indexer 就很熟悉了，即DeploymentInformer->cache.SharedIndexInformer-> SharedInformer.那么SharedInformer 又是啥呢？
 
 - **client-go/tools/cache/shared_informer.go:133**
 
@@ -569,6 +569,476 @@ type SharedInformer interface {
    SetWatchErrorHandler(handler WatchErrorHandler) error
 }
 ```
+
+### sharedIndexerInformer
+
+接下来就该看下 **SharedIndexInformer** 接口的实现了，**sharedIndexerInformer** 定义如下：
+
+- **client-go/tools/cache/shared_informer.go:287**
+
+```go
+type sharedIndexInformer struct {
+   indexer    Indexer
+   controller Controller
+   processor             *sharedProcessor
+   cacheMutationDetector MutationDetector
+   listerWatcher ListerWatcher
+   // 表示当前 Informer 期望关注的类型，主要是 GVK 信息
+   objectType runtime.Object
+   // reflector 的 resync 计时器计时间隔，通知所有的 listener 执行 resync
+   resyncCheckPeriod time.Duration
+   defaultEventHandlerResyncPeriod time.Duration
+   clock clock.Clock
+   started, stopped bool
+   startedLock      sync.Mutex
+   blockDeltas sync.Mutex
+   watchErrorHandler WatchErrorHandler
+}
+```
+
+这里的 Indexer、Controller、ListerWatcher 等都是我们熟悉的组件，**sharedProcessor** 我们在前面遇到了，需要重点关注一下。
+
+### sharedProcessor
+
+**sharedProcessor** 中维护了 processorListener 集合，然后分发通知对象到这些 listeners，先看下结构定义：
+
+- **client-go/tools/cache/shared_informer.go:588**
+
+```go
+type sharedProcessor struct {
+   listenersStarted bool
+   listenersLock    sync.RWMutex
+   listeners        []*processorListener
+   syncingListeners []*processorListener
+   clock            clock.Clock
+   wg               wait.Group
+}
+```
+
+马上就会有一个疑问了，**processorListener** 是什么？
+
+#### processorListener
+
+- **client-go/tools/cache/shared_informer.go:690**
+
+```go
+
+type processorListener struct {
+   nextCh chan interface{}
+   addCh  chan interface{}
+   // 核心属性
+   handler ResourceEventHandler
+   pendingNotifications buffer.RingGrowing
+   requestedResyncPeriod time.Duration
+   resyncPeriod time.Duration
+   nextResync time.Time
+   resyncLock sync.Mutex
+}
+```
+
+可以看到 processorListener 里有一个 ResourceEventHandler，这是我们认识的组件。processorListener 有三个主要方法：
+
+- `add(notification interface{})`
+- `pop()`
+- `run()`
+
+一个个来看吧。
+
+**run()**
+
+- **client-go/tools/cache/shared_informer.go:775**
+
+```go
+func (p *processorListener) run() {
+   stopCh := make(chan struct{})
+   wait.Until(func() {
+      for next := range p.nextCh {
+         switch notification := next.(type) {
+         case updateNotification:
+            p.handler.OnUpdate(notification.oldObj, notification.newObj)
+         case addNotification:
+            p.handler.OnAdd(notification.newObj)
+         case deleteNotification:
+            p.handler.OnDelete(notification.oldObj)
+         default:
+            utilruntime.HandleError(fmt.Errorf("unrecognized notification: %T", next))
+         }
+      }
+      close(stopCh)
+   }, 1*time.Second, stopCh)
+}
+```
+
+这里的逻辑很清晰，从 nextCh 里拿通知，然后根据其类型去调用 **ResourceEventHandler** 相应的 `OnAdd/OnUpdate/OnDelete` 方法。
+
+**add() 和 pop()**
+
+- **client-go/tools/cache/shared_informer.go:741**
+
+```go
+func (p *processorListener) add(notification interface{}) {
+   // 将通知放到 addCh 中，所以下面 pop() 方法里先执行到的 case 是第二个
+   p.addCh <- notification
+}
+
+func (p *processorListener) pop() {
+   defer utilruntime.HandleCrash()
+   defer close(p.nextCh) // Tell .run() to stop
+
+   var nextCh chan<- interface{}
+   var notification interface{}
+   for {
+      select {
+        // 下面获取到的通知，添加到 nextCh 里，供 run() 方法中消费
+      case nextCh <- notification:
+         var ok bool
+         // 从 pendingNotifications 里消费通知，生产者在下面 case 里
+         notification, ok = p.pendingNotifications.ReadOne()
+         if !ok {
+            nextCh = nil
+         }
+        // 逻辑从这里开始，从 addCh 里提取通知
+      case notificationToAdd, ok := <-p.addCh:
+         if !ok {
+            return
+         }
+         if notification == nil { 
+            notification = notificationToAdd
+            nextCh = p.nextCh
+         } else {
+            // 新添加的通知丢到 pendingNotifications
+            p.pendingNotifications.WriteOne(notificationToAdd)
+         }
+      }
+   }
+}
+
+```
+
+也就是说 processorListener 提供了一定的缓冲机制来接收 notification，然后去消费这些 notification 调用 ResourceEventHandler 相关方法。
+
+然后接着继续看 sharedProcessor 的几个主要方法。
+
+#### sharedProcessor.addListener()
+
+**addListener** 会直接调用 **listener** 的 `run()` 和 `pop()` 方法，这两个方法的逻辑我们上面已经分析过
+
+- **client-go/tools/cache/shared_informer.go:597**
+
+```go
+
+func (p *sharedProcessor) addListener(listener *processorListener) {
+   p.listenersLock.Lock()
+   defer p.listenersLock.Unlock()
+
+   p.addListenerLocked(listener)
+   if p.listenersStarted {
+      p.wg.Start(listener.run)
+      p.wg.Start(listener.pop)
+   }
+}
+```
+
+#### sharedProcessor.distribute()
+
+**distribute** 的逻辑就是调用 **sharedProcessor** 内部维护的所有 listner 的 `add()` 方法
+
+- **client-go/tools/cache/shared_informer.go:613**
+
+```go
+func (p *sharedProcessor) distribute(obj interface{}, sync bool) {
+   p.listenersLock.RLock()
+   defer p.listenersLock.RUnlock()
+
+   if sync {
+      for _, listener := range p.syncingListeners {
+         listener.add(obj)
+      }
+   } else {
+      for _, listener := range p.listeners {
+         listener.add(obj)
+      }
+   }
+}
+
+```
+
+#### sharedProcessor.run()
+
+`run()` 的逻辑和前面的 addListener() 类似，也就是调用 **listener** 的 `run()` 和 `pop()` 方法
+
+- **client-go/tools/cache/shared_informer.go:628**
+
+```go
+func (p *sharedProcessor) run(stopCh <-chan struct{}) {
+	func() {
+		p.listenersLock.RLock()
+		defer p.listenersLock.RUnlock()
+		for _, listener := range p.listeners {
+			p.wg.Start(listener.run)
+			p.wg.Start(listener.pop)
+		}
+		p.listenersStarted = true
+	}()
+	<-stopCh
+	p.listenersLock.RLock()
+	defer p.listenersLock.RUnlock()
+	for _, listener := range p.listeners {
+		close(listener.addCh)
+	}
+	p.wg.Wait()
+}
+
+```
+
+到这里基本就知道 **sharedProcessor** 的能力了，继续往下看。
+
+### sharedIndexInformer.Run()
+
+继续来看 **sharedIndexInformer** 的 `Run()` 方法，这里面已经几乎没有陌生的内容了。
+
+- **client-go/tools/cache/shared_informer.go:368**
+
+```go
+func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
+   defer utilruntime.HandleCrash()
+
+   if s.HasStarted() {
+      klog.Warningf("The sharedIndexInformer has started, run more than once is not allowed")
+      return
+   }
+   // DeltaFIFO 就很熟悉了
+   fifo := NewDeltaFIFOWithOptions(DeltaFIFOOptions{
+      KnownObjects:          s.indexer,
+      EmitDeltaTypeReplaced: true,
+   })
+   // Config 的逻辑也在上面遇到过了
+   cfg := &Config{
+      Queue:            fifo,
+      ListerWatcher:    s.listerWatcher,
+      ObjectType:       s.objectType,
+      FullResyncPeriod: s.resyncCheckPeriod,
+      RetryOnError:     false,
+      ShouldResync:     s.processor.shouldResync,
+
+      Process:           s.HandleDeltas,
+      WatchErrorHandler: s.watchErrorHandler,
+   }
+
+   func() {
+      s.startedLock.Lock()
+      defer s.startedLock.Unlock()
+      // 前文分析过这里的 New() 函数逻辑了
+      s.controller = New(cfg)
+      s.controller.(*controller).clock = s.clock
+      s.started = true
+   }()
+
+   processorStopCh := make(chan struct{})
+   var wg wait.Group
+   defer wg.Wait()              
+   defer close(processorStopCh) 
+   wg.StartWithChannel(processorStopCh, s.cacheMutationDetector.Run)
+   // processor 的 run 方法
+   wg.StartWithChannel(processorStopCh, s.processor.run)
+
+   defer func() {
+      s.startedLock.Lock()
+      defer s.startedLock.Unlock()
+      s.stopped = true // Don't want any new listeners
+   }()
+   // controller 的 Run()
+   s.controller.Run(stopCh)
+}
+
+```
+
+到这里也就基本知道了 sharedIndexInformer 的逻辑了，再往上层走就剩下一个 **SharedInformerFactory** 了，继续看吧～
+
+## SharedInformerFactory
+
+我们前面提到过 SharedInformerFactory，现在具体来看一下 SharedInformerFactory 是怎么实现的。先看接口定义：
+
+- **client-go/informers/factory.go:187**
+
+```go
+
+type SharedInformerFactory interface {
+   internalinterfaces.SharedInformerFactory
+   ForResource(resource schema.GroupVersionResource) (GenericInformer, error)
+   WaitForCacheSync(stopCh <-chan struct{}) map[reflect.Type]bool
+
+   Admissionregistration() admissionregistration.Interface
+   Internal() apiserverinternal.Interface
+   Apps() apps.Interface
+   Autoscaling() autoscaling.Interface
+   Batch() batch.Interface
+   Certificates() certificates.Interface
+   Coordination() coordination.Interface
+   Core() core.Interface
+   Discovery() discovery.Interface
+   Events() events.Interface
+   Extensions() extensions.Interface
+   Flowcontrol() flowcontrol.Interface
+   Networking() networking.Interface
+   Node() node.Interface
+   Policy() policy.Interface
+   Rbac() rbac.Interface
+   Scheduling() scheduling.Interface
+   Storage() storage.Interface
+}
+```
+
+这里涉及到几个点：
+
+1. **internalinterfaces.SharedInformerFactory**
+
+这也是一个接口，比较简短：
+
+```go
+type SharedInformerFactory interface {
+   Start(stopCh <-chan struct{})
+   InformerFor(obj runtime.Object, newFunc NewInformerFunc) cache.SharedIndexInformer
+}
+
+```
+
+可以看到熟悉的 **SharedIndexInformer**
+
+1. **ForResource(resource schema.GroupVersionResource) (GenericInformer, error)**
+
+这里接收一个 GVR，返回了一个 **GenericInformer**，看下什么是 GenericInformer：
+
+```go
+type GenericInformer interface {
+   Informer() cache.SharedIndexInformer
+   Lister() cache.GenericLister
+}
+```
+
+也很简短。
+
+1. **Apps() apps.Interface 等**
+
+后面一堆方法是类似的，我们以 Apps() 为例来看下怎么回事。这里的 Interface 定义如下：
+
+- **client-go/informers/apps/interface.go:29**
+
+```go
+type Interface interface {
+   // V1 provides access to shared informers for resources in V1.
+   V1() v1.Interface
+   // V1beta1 provides access to shared informers for resources in V1beta1.
+   V1beta1() v1beta1.Interface
+   // V1beta2 provides access to shared informers for resources in V1beta2.
+   V1beta2() v1beta2.Interface
+}
+
+```
+
+显然应该继续看下 **v1.Interface** 是个啥。
+
+- **client-go/informers/apps/v1/interface.go:26**
+
+```go
+type Interface interface {
+   // ControllerRevisions returns a ControllerRevisionInformer.
+   ControllerRevisions() ControllerRevisionInformer
+   // DaemonSets returns a DaemonSetInformer.
+   DaemonSets() DaemonSetInformer
+   // Deployments returns a DeploymentInformer.
+   Deployments() DeploymentInformer
+   // ReplicaSets returns a ReplicaSetInformer.
+   ReplicaSets() ReplicaSetInformer
+   // StatefulSets returns a StatefulSetInformer.
+   StatefulSets() StatefulSetInformer
+}
+```
+
+到这里已经有看着很眼熟的 `Deployments() DeploymentInformer` 之类的代码了，DeploymentInformer 我们刚才看过内部结构，长这样：
+
+```go
+type DeploymentInformer interface {
+   Informer() cache.SharedIndexInformer
+   Lister() v1.DeploymentLister
+}
+
+```
+
+到这里也就不难理解 **SharedInformerFactory** 的作用了，它提供了所有 API group-version 的资源对应的 SharedIndexInformer，也就不难理解开头我们引用的 sample-controller 中的这行代码：
+
+```
+kubeInformerFactory.Apps().V1().Deployments()
+```
+
+通过其可以拿到一个 Deployment 资源对应的 SharedIndexInformer。
+
+### NewSharedInformerFactory
+
+继续看下 SharedInformerFactory 是如何创建的
+
+- **client-go/informers/factory.go:96**
+
+```go
+func NewSharedInformerFactory(client kubernetes.Interface, defaultResync time.Duration) SharedInformerFactory {
+   return NewSharedInformerFactoryWithOptions(client, defaultResync)
+}
+```
+
+可以看到参数非常简单，主要是需要一个 Clientset，毕竟 ListerWatcher 的能力本质还是 client 提供的。
+
+- **client-go/informers/factory.go:109**
+
+```go
+
+func NewSharedInformerFactoryWithOptions(client kubernetes.Interface, defaultResync time.Duration, options ...SharedInformerOption) SharedInformerFactory {
+   factory := &sharedInformerFactory{
+      client:           client,
+      namespace:        v1.NamespaceAll, // 空字符串 ""
+      defaultResync:    defaultResync,
+      informers:        make(map[reflect.Type]cache.SharedIndexInformer), // 可以存放不同类型的 SharedIndexInformer
+      startedInformers: make(map[reflect.Type]bool),
+      customResync:     make(map[reflect.Type]time.Duration),
+   }
+
+   for _, opt := range options {
+      factory = opt(factory)
+   }
+
+   return factory
+}
+```
+
+接着是如何启动
+
+### sharedInformerFactory.Start()
+
+- **client-go/informers/factory.go:128**
+
+```go
+func (f *sharedInformerFactory) Start(stopCh <-chan struct{}) {
+   f.lock.Lock()
+   defer f.lock.Unlock()
+
+   for informerType, informer := range f.informers {
+      // 同类型只会调用一次，Run() 的逻辑我们前面介绍过了
+      if !f.startedInformers[informerType] {
+         go informer.Run(stopCh)
+         f.startedInformers[informerType] = true
+      }
+   }
+}
+```
+
+## 小结
+
+今天我们一个基础 Informer - **Controller** 开始介绍，先分析了 Controller 的能力，也就是其通过构造 Reflector 并启动从而能够获取指定类型资源的“更新”事件，然后通过事件构造 Delta 放到 DeltaFIFO 中，进而在 **processLoop** 中从 DeltaFIFO 里 pop Deltas 来处理，一方面将对象通过 **Indexer** 同步到本地 cache，也就是一个 **ThreadSafeStore**，一方面调用 **ProcessFunc** 来处理这些 Delta。
+
+然后 **SharedIndexInformer** 提供了构造 Controller 的能力，通过 **HandleDeltas()** 方法实现上面提到的 ProcessFunc，同时还引入了 **sharedProcessor** 在 HandleDeltas() 中用于事件通知的处理。sharedProcessor 分发事件通知的时候，接收方是内部继续抽象出来的 **processorListener**，在 processorListener 中完成了 **ResourceEventHandler** 具体回调函数的调用。
+
+
+
+
 
 
 
