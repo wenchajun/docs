@@ -257,3 +257,271 @@ type CronJobStatus struct {
 
 接下来，定义与实际类型对应的类型，`CronJob` 和`CronJobList`.`CronJob` 是我们的根类型, 并且描述 `CronJob` kind.与所有的kubernetes对象一样，它包含`TypeMeta`（描述API version以及Kind），并且包含了`ObjectMeta`，里面保存了name、namespace、label等信息。
 
+`CronJobList` 简单的包含了多个 `CronJob`s. 它是批量操作中使用的Kind , 像 LIST。
+
+一般来说，我们从不修改其中任何一个——所有的修改都在Spec或Status中进行。
+
+注释`+kubebuilder:object:root`称为标记。我们将在后面看到更多，它告诉controller-tools（我们的代码以及YAML自动生成器）信息，controller-tool会自动生成。这个特殊的参数告诉`obeject`生成器这个类型代表一个Kind。然后，这个`object`生成器为我们 [runtime.Object](https://pkg.go.dev/k8s.io/apimachinery/pkg/runtime?tab=doc#Object) 的生成实现，这是所有代表Kinds的类型必须实现的标准接口。（这个就像长难句Then, the `object` generator generates an implementation of the [runtime.Object](https://pkg.go.dev/k8s.io/apimachinery/pkg/runtime?tab=doc#Object) interface for us, which is the standard interface that all types representing Kinds must implement.）
+
+```go
+//+kubebuilder:object:root=true
+//+kubebuilder:subresource:status
+
+// CronJob is the Schema for the cronjobs API
+type CronJob struct {
+    metav1.TypeMeta   `json:",inline"`
+    metav1.ObjectMeta `json:"metadata,omitempty"`
+
+    Spec   CronJobSpec   `json:"spec,omitempty"`
+    Status CronJobStatus `json:"status,omitempty"`
+}
+
+//+kubebuilder:object:root=true
+
+// CronJobList contains a list of CronJob
+type CronJobList struct {
+    metav1.TypeMeta `json:",inline"`
+    metav1.ListMeta `json:"metadata,omitempty"`
+    Items           []CronJob `json:"items"`
+}
+
+
+```
+
+最后，我们将Go类型添加到API组。这允许我们将这个API组中的类型添加到任何Scheme中。
+
+```go
+func init() {
+    SchemeBuilder.Register(&CronJob{}, &CronJobList{})
+}
+```
+
+现在我们已经看到了基本结构，让我们来填充它!
+
+#### 1.5[Designing an API](https://book.kubebuilder.io/cronjob-tutorial/api-design.html#designing-an-api)
+
+在Kubernetes中，我们有一些设计api的规则。也就是说，所有序列化的字段必须是驼峰式的，因此我们使用JSON结构标记来指定这一点。我们还可以使用`omitempty`结构标记来标记一个字段在为空时应该从序列化字段中删除。
+
+字段可以使用大多数基本类型。数字除外:为了API的兼容性，我们接受三种形式的数字:对于整数有`int32` 以及`int64`，对于`resource.Quantity`允许设置小数。
+
+> Hold up, what's a Quantity?
+>
+> Quantities是十进制数字的一种特殊表示法，它具有显式固定的表示形式，使它们更易于跨机器移植。你可能已经在kubernetes中的requests与limits中见过了。他们在概念上类似于浮点数：they have a significant, base, and exponent.它们使用整数和后缀来形成序列化和人类可读的格式，就像我们描述计算机存储一样。
+>
+> 例如，2m在十进制中表示0.002。2Ki表示十进制2048,2K表示十进制2000。如果我们想要指定分数，我们可以切换到一个后缀，比如:2.5是2500m
+>
+> There are two supported bases: 10 and 2 (called decimal and binary, respectively). Decimal base is indicated with “normal” SI suffixes (e.g. `M` and `K`), while Binary base is specified in “mebi” notation (e.g. `Mi` and `Ki`). Think [megabytes vs mebibytes](https://en.wikipedia.org/wiki/Binary_prefix).
+
+我们还使用了另一种特殊类型:`metav1.Time`。这个字段等价于 `time.Time`，除了它有一个固定的、可移植的序列化格式。
+
+解决了这些问题之后，让我们看看CronJob对象是什么样子的!
+
+```go
+//Apache License
+package v1
+//Imports
+import (
+    batchv1beta1 "k8s.io/api/batch/v1beta1"
+    corev1 "k8s.io/api/core/v1"
+    metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
+// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+
+```
+
+首先，让我们看看我们的spec，正如我们之前所讨论的，spec持有期望的状态，所以controller的任何“输入”都在这里。
+
+从根本上说，CronJob需要以下几点:
+
+- A schedule (the *cron* in CronJob)
+- A template for the Job to run (the *job* in CronJob)
+
+我们还需要一些额外的功能，这将让我们的用户使用更轻松:
+
+- A deadline for starting jobs (if we miss this deadline, we’ll just wait till the next scheduled time)停止时间
+- What to do if multiple jobs would run at once (do we wait? stop the old one? run both?)多个任务
+- A way to pause the running of a CronJob, in case something’s wrong with it暂停方面
+- Limits on old job history对于老的job历史的限制
+
+记住，因为我们从不读自己的status，我们需要另外的方法来跟踪job是否运行。我们至少可以用一个old job来做这个。
+
+我们将使用几个标记(// +comment)来指定额外的元数据。当生成我们的CRD清单时，这些将被controller-tool使用。稍后我们将看到，controller-tool也将使用GoDoc来形成字段的描述。
+
+```go
+
+// CronJobSpec defines the desired state of CronJob
+type CronJobSpec struct {
+    //+kubebuilder:validation:MinLength=0
+
+    // The schedule in Cron format, see https://en.wikipedia.org/wiki/Cron.
+    Schedule string `json:"schedule"`
+
+    //+kubebuilder:validation:Minimum=0
+
+    // Optional deadline in seconds for starting the job if it misses scheduled
+    // time for any reason.  Missed jobs executions will be counted as failed ones.
+    // +optional
+    StartingDeadlineSeconds *int64 `json:"startingDeadlineSeconds,omitempty"`
+
+    // Specifies how to treat concurrent executions of a Job.
+    // Valid values are:
+    // - "Allow" (default): allows CronJobs to run concurrently;
+    // - "Forbid": forbids concurrent runs, skipping next run if previous run hasn't finished yet;
+    // - "Replace": cancels currently running job and replaces it with a new one
+    // +optional
+    ConcurrencyPolicy ConcurrencyPolicy `json:"concurrencyPolicy,omitempty"`
+
+    // This flag tells the controller to suspend subsequent executions, it does
+    // not apply to already started executions.  Defaults to false.
+    // +optional
+    Suspend *bool `json:"suspend,omitempty"`
+
+    // Specifies the job that will be created when executing a CronJob.
+    JobTemplate batchv1beta1.JobTemplateSpec `json:"jobTemplate"`
+
+    //+kubebuilder:validation:Minimum=0
+
+    // The number of successful finished jobs to retain.
+    // This is a pointer to distinguish between explicit zero and not specified.
+    // +optional
+    SuccessfulJobsHistoryLimit *int32 `json:"successfulJobsHistoryLimit,omitempty"`
+
+    //+kubebuilder:validation:Minimum=0
+
+    // The number of failed finished jobs to retain.
+    // This is a pointer to distinguish between explicit zero and not specified.
+    // +optional
+    FailedJobsHistoryLimit *int32 `json:"failedJobsHistoryLimit,omitempty"`
+}
+```
+
+我们定义一个自定义类型来保存并发策略。它实际上只是一个字符串，但类型提供了额外的文档，并允许我们将验证附加到类型上，而不是字段上，使验证更容易重用。
+
+```go
+
+// ConcurrencyPolicy describes how the job will be handled.
+// Only one of the following concurrent policies may be specified.
+// If none of the following policies is specified, the default one
+// is AllowConcurrent.
+// +kubebuilder:validation:Enum=Allow;Forbid;Replace
+type ConcurrencyPolicy string
+
+const (
+    // AllowConcurrent allows CronJobs to run concurrently.
+    AllowConcurrent ConcurrencyPolicy = "Allow"
+
+    // ForbidConcurrent forbids concurrent runs, skipping next run if previous
+    // hasn't finished yet.
+    ForbidConcurrent ConcurrencyPolicy = "Forbid"
+
+    // ReplaceConcurrent cancels currently running job and replaces it with a new one.
+    ReplaceConcurrent ConcurrencyPolicy = "Replace"
+)
+
+```
+
+接下来，让我们设计status，它保存观察到的状态。它包含我们希望用户或其他controller能够轻松获得的任何信息。
+
+我们将保留一个积极运行jobs的列表，以及最后一次成功运行job的记录。注意，就像上面提到的，我们使用`metav1.Time`而不是`time.Time`
+
+```go
+
+// CronJobStatus defines the observed state of CronJob
+type CronJobStatus struct {
+    // INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
+    // Important: Run "make" to regenerate code after modifying this file
+
+    // A list of pointers to currently running jobs.
+    // +optional
+    Active []corev1.ObjectReference `json:"active,omitempty"`
+
+    // Information when was the last time the job was successfully scheduled.
+    // +optional
+    LastScheduleTime *metav1.Time `json:"lastScheduleTime,omitempty"`
+}
+```
+
+最后，我们有我们已经讨论过的其余样板。如前所述，除了subresource status标记外，我们不需要更改它，这样我们的行为就像内置的kubernetes类型。
+
+```go
+//+kubebuilder:object:root=true
+//+kubebuilder:subresource:status
+
+// CronJob is the Schema for the cronjobs API
+type CronJob struct {
+//Root Object Definitions
+    metav1.TypeMeta   `json:",inline"`
+    metav1.ObjectMeta `json:"metadata,omitempty"`
+
+    Spec   CronJobSpec   `json:"spec,omitempty"`
+    Status CronJobStatus `json:"status,omitempty"`
+}
+
+//+kubebuilder:object:root=true
+
+// CronJobList contains a list of CronJob
+type CronJobList struct {
+    metav1.TypeMeta `json:",inline"`
+    metav1.ListMeta `json:"metadata,omitempty"`
+    Items           []CronJob `json:"items"`
+}
+
+func init() {
+    SchemeBuilder.Register(&CronJob{}, &CronJobList{})
+}
+```
+
+现在我们有了一个API，我们需要编写一个controller来实际实现这个功能
+
+#### 1.5.1[A Brief Aside: What’s the rest of this stuff?](https://book.kubebuilder.io/cronjob-tutorial/other-api-files.html#a-brief-aside-whats-the-rest-of-this-stuff)
+
+旁白，剩下的东西是什么
+
+如果您查看了api/v1/目录中的其他文件，您可能会注意到除了cronjob_types之外还有两个文件`groupversion_info.go` 和`zz_generated.deepcopy.go`.
+
+这两个文件都不需要编辑(前一个保持不变，后一个是自动生成的)，但是知道其中的内容是很有用的。
+
+`groupversion_info.go`包含了关于group-version中共同的元数据。
+
+首先，我们有一些包级别的标记，它们表示这个包中有Kubernetes对象，这个包代表的是group`batch.tutorial.kubebuilder.io`。`object`生成器利用前者，而后者由CRD生成器用于为它从这个包中创建的CRD生成正确的元数据。
+
+```go
+// Package v1 contains API Schema definitions for the batch v1 API group
+//+kubebuilder:object:generate=true
+//+groupName=batch.tutorial.kubebuilder.io
+package v1
+
+import (
+    "k8s.io/apimachinery/pkg/runtime/schema"
+    "sigs.k8s.io/controller-runtime/pkg/scheme"
+)
+```
+
+然后，我们有了帮助我们设置Scheme的常用变量。因为我们需要在controller中使用这个包中的所有类型，所以使用一个方便的方法将所有类型添加到其他Scheme中是很有帮助的(也是约定的)。SchemeBuilder使我们很容易做到这一点。
+
+```go
+var (
+    // GroupVersion is group version used to register these objects
+    GroupVersion = schema.GroupVersion{Group: "batch.tutorial.kubebuilder.io", Version: "v1"}
+
+    // SchemeBuilder is used to add go types to the GroupVersionKind scheme
+    SchemeBuilder = &scheme.Builder{GroupVersion: GroupVersion}
+
+    // AddToScheme adds the types in this group-version to the given scheme.
+    AddToScheme = SchemeBuilder.AddToScheme
+)
+```
+
+#### [`zz_generated.deepcopy.go`](https://book.kubebuilder.io/cronjob-tutorial/other-api-files.html#zz_generateddeepcopygo)
+
+`zz_generated.deepcopy.go` contains the autogenerated implementation of the aforementioned `runtime.Object` interface, which marks all of our root types as representing Kinds.
+
+The core of the `runtime.Object` interface is a deep-copy method, `DeepCopyObject`.
+
+The `object` generator in controller-tools also generates two other handy methods for each root type and all its sub-types: `DeepCopy` and `DeepCopyInto`.
+
+简言之，就是自动生成的。
+
+#### [What’s in a controller?](https://book.kubebuilder.io/cronjob-tutorial/controller-overview.html#whats-in-a-controller)
