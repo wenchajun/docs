@@ -1,34 +1,74 @@
-本来搜索到的，在stack上看到
+方法一
 
-https://stackoverflow.com/questions/55314152/how-to-get-namespace-from-current-context-set-in-kube-config/55315895#55315895
+添加字段
 
-然后又进入
-
-[How to get namespace from current-context set in .kube/config](https://stackoverflow.com/questions/55314152/how-to-get-namespace-from-current-context-set-in-kube-config)
-
-感觉这个回答比较好
-
-This code, based on answer https://stackoverflow.com/a/55315895/2784039, returns the namespace set in the current context of the `kubeconfig` file. In addition, it sets `namespace` to `default` if `namespace` is not defined in the `kubeconfig` current context:
-
-```go
-package main
-
-import (
-    "fmt"
-
-    "k8s.io/client-go/tools/clientcmd"
-)
-
-func main() {
-
-    clientCfg, _ := clientcmd.NewDefaultClientConfigLoadingRules().Load()
-    namespace := clientCfg.Contexts[clientCfg.CurrentContext].Namespace
-
-    if namespace == "" {
-        namespace = "default"
-    }
-    fmt.Printf(namespace)
-}
+```yaml
+    env:
+        - name: MY_POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
 ```
 
-This code works fine on user side, it it is run outside the cluster. Check comments below to retrieve `namespace` for a pod inside the cluster.
+完整如下
+
+```yaml
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: fluentbit-operator
+  namespace: kubesphere-logging-system
+  labels:
+    app.kubernetes.io/component: operator
+    app.kubernetes.io/name: fluentbit-operator
+  annotations:
+    deployment.kubernetes.io/revision: '5'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: operator
+      app.kubernetes.io/name: fluentbit-operator
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app.kubernetes.io/component: operator
+        app.kubernetes.io/name: fluentbit-operator
+    spec:
+      containers:
+        - name: fluentbit-operator
+          image: 'wenchajun/fluentbit-operator:v1.3'
+          env:
+            - name: MY_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+          resources:
+            limits:
+              cpu: 100m
+              memory: 30Mi
+
+```
+
+代码中直接get即可
+
+```go
+		 ns:= os.Getenv("MY_POD_NAMESPACE")
+	     fmt.Println("my namespace is ",ns)
+
+```
+
+二.读取文件
+
+```go
+  
+		filePath :="/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+		nsRead ,err :=ioutil.ReadFile(filePath)
+		if err !=nil {
+			return ctrl.Result{}, err
+		}  
+```
+

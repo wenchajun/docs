@@ -525,3 +525,97 @@ The `object` generator in controller-tools also generates two other handy method
 简言之，就是自动生成的。
 
 #### [What’s in a controller?](https://book.kubebuilder.io/cronjob-tutorial/controller-overview.html#whats-in-a-controller)
+
+Controllers是Kubernetes以及任何operator中的核心。
+
+Controllers的工作是确保任何给定对象的实际状态(包括集群状态和潜在的外部状态，如Kubelet的运行容器或云提供商的负载平衡器)与对象中的期望状态相匹配。每个控制器专注于一个root类型，但可能与其他类型交互。
+
+我们把这个过程叫做 *reconciling*。
+
+在Controllers运行时中，为特定类型实现协调的逻辑称为[*Reconciler*](https://pkg.go.dev/sigs.k8s.io/controller-runtime/pkg/reconcile?tab=doc)。Reconciler获取对象的名称，并返回是否需要再次尝试(例如，在出现错误或定期控制器的情况下，如HorizontalPodAutoscaler)。
+
+首先，我们从一些标准导入开始。和以前一样，我们需要核心控制器运行时库、client包和API类型包。
+
+```go
+
+package controllers
+
+import (
+    "context"
+
+    "k8s.io/apimachinery/pkg/runtime"
+    ctrl "sigs.k8s.io/controller-runtime"
+    "sigs.k8s.io/controller-runtime/pkg/client"
+    "sigs.k8s.io/controller-runtime/pkg/log"
+
+    batchv1 "tutorial.kubebuilder.io/project/api/v1"
+)
+```
+
+接下来，kubebuilder为我们搭建了一个基本的reconciler结构。几乎每个reconciler都需要记录日志，并且需要能够获取对象，所以这些都是一开始时自动添加的。
+
+```go
+
+// CronJobReconciler reconciles a CronJob object
+type CronJobReconciler struct {
+    client.Client
+    Scheme *runtime.Scheme
+}
+```
+
+大多数controllers最终会运行在集群上，因此它们需要RBAC权限，我们使用控制器工具RBAC标记来指定权限。这些是运行所需的最低权限。随着我们添加更多的功能，我们需要重新访问这些功能。
+
+```go
+// +kubebuilder:rbac:groups=batch.tutorial.kubebuilder.io,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch.tutorial.kubebuilder.io,resources=cronjobs/status,verbs=get;update;patch
+```
+
+实际上，Reconcile对单个命名对象执行协调。我们的Request只有一个名称，但是我们可以使用客户端从缓存中获取该对象。
+
+我们返回一个空的结果并且没有错误，这向控制器运行时表明我们已经成功地协调了这个对象，并且在发生一些更改之前不需要再次尝试。
+
+大多数controllers 需要 一个logging handle 以及 a context, 所以我们在这里设置它。
+
+上下文用于允许取消请求，以及可能进行的跟踪等操作。它是所有客户端方法的第一个参数。Background上下文只是一个基本的上下文，没有任何额外的数据或时间限制。
+
+logging handle让我们记录日志。控制器运行时通过一个名为logr的库使用结构化日志记录。我们很快就会看到，日志是通过将键值对附加到静态消息来工作的。我们可以在调和方法的顶部预先分配一些对，以便将这些键值对附加到这个调和器中的所有日志线上。
+
+```go
+func (r *CronJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+    _ = log.FromContext(ctx)
+
+    // your logic here
+
+    return ctrl.Result{}, nil
+}
+
+```
+
+最后，我们将这个协调器添加到管理器中，以便在管理器启动时启动协调器。
+
+现在，我们只注意到这个协调器对CronJobs起作用。稍后，我们将使用它来标记我们关心的相关对象。
+
+```go
+
+func (r *CronJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
+    return ctrl.NewControllerManagedBy(mgr).
+        For(&batchv1.CronJob{}).
+        Complete(r)
+}
+
+```
+
+现在我们已经看到了协调器的基本结构，让我们来填写CronJobs的逻辑。
+
+#### [Implementing a controller](https://book.kubebuilder.io/cronjob-tutorial/controller-implementation.html#implementing-a-controller)
+
+我们的 CronJob controller的具体逻辑是这样的:
+
+1. Load the named CronJob加载命名的CronJob
+2. List all active jobs, and update the status列出所有运行的jobs，更新status
+3. Clean up old jobs according to the history limits通过历史限制清扫老的jobs
+4. Check if we’re suspended (and don’t do anything else if we are)检查我们是否被暂停(如果被暂停，不要做其他任何事情)
+5. Get the next scheduled run获得下一次计划运行
+6. Run a new job if it’s on schedule, not past the deadline, and not blocked by our concurrency policy如果新作业按计划运行，且未超过截止日期，且未被并发策略阻塞，则运行它
+7. Requeue when we either see a running job (done automatically) or it’s time for the next scheduled run.当我们看到一个正在运行的作业(自动完成)或者是下一次计划运行的时间时，就会调用Requeue。
+
