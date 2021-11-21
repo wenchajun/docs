@@ -619,3 +619,98 @@ func (r *CronJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 6. Run a new job if it’s on schedule, not past the deadline, and not blocked by our concurrency policy如果新作业按计划运行，且未超过截止日期，且未被并发策略阻塞，则运行它
 7. Requeue when we either see a running job (done automatically) or it’s time for the next scheduled run.当我们看到一个正在运行的作业(自动完成)或者是下一次计划运行的时间时，就会调用Requeue。
 
+我们将从一些import开始。你会看到下面，我们将需要更多的导入比那些脚手架为我们。我们会在使用时逐一讨论。
+
+```go
+package controllers
+
+import (
+    "context"
+    "fmt"
+    "sort"
+    "time"
+
+    "github.com/robfig/cron"
+    kbatch "k8s.io/api/batch/v1"
+    corev1 "k8s.io/api/core/v1"
+    metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+    "k8s.io/apimachinery/pkg/runtime"
+    ref "k8s.io/client-go/tools/reference"
+    ctrl "sigs.k8s.io/controller-runtime"
+    "sigs.k8s.io/controller-runtime/pkg/client"
+    "sigs.k8s.io/controller-runtime/pkg/log"
+
+    batchv1 "tutorial.kubebuilder.io/project/api/v1"
+)
+```
+
+接下来，我们需要一个Clock，它将允许我们在测试中伪造计时。
+
+```go
+
+// CronJobReconciler reconciles a CronJob object
+type CronJobReconciler struct {
+    client.Client
+    Scheme *runtime.Scheme
+    Clock
+}
+//Clock
+```
+
+
+
+我们将模拟时钟，使它更容易在测试时跳过时间，“真正的”时钟只是调用`time.Now`
+
+```go
+type realClock struct{}
+
+func (_ realClock) Now() time.Time { return time.Now() }
+
+// clock knows how to get the current time.
+// It can be used to fake out timing for testing.
+type Clock interface {
+    Now() time.Time
+}
+```
+
+注意，我们还需要一些RBAC权限——因为我们现在正在创建和管理作业，所以需要这些权限，这意味着添加更多的标记
+
+```go
+//+kubebuilder:rbac:groups=batch.tutorial.kubebuilder.io,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=batch.tutorial.kubebuilder.io,resources=cronjobs/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=batch.tutorial.kubebuilder.io,resources=cronjobs/finalizers,verbs=update
+//+kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=batch,resources=jobs/status,verbs=get
+```
+
+现在，我们来看看controller的核心——reconciler逻辑。
+
+```go
+var (
+    scheduledTimeAnnotation = "batch.tutorial.kubebuilder.io/scheduled-at"
+)
+
+func (r *CronJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+    log := log.FromContext(ctx)
+
+```
+
+##### [1: Load the CronJob by name](https://book.kubebuilder.io/cronjob-tutorial/controller-implementation.html#1-load-the-cronjob-by-name)
+
+我们将使用我们的client来获取CronJob。所有client方法都将使用context(允许取消)作为其第一个参数，将所讨论的对象作为其最后一个参数。Get有点特殊，因为它接受NamespacedName作为中间参数(正如我们将在下面看到的，大多数都没有中间参数)。
+
+许多client方法最后也采用可变选项。
+
+```go
+ var cronJob batchv1.CronJob
+    if err := r.Get(ctx, req.NamespacedName, &cronJob); err != nil {
+        log.Error(err, "unable to fetch CronJob")
+        // we'll ignore not-found errors, since they can't be fixed by an immediate
+        // requeue (we'll need to wait for a new notification), and we can get them
+        // on deleted requests.
+        return ctrl.Result{}, client.IgnoreNotFound(err)
+    }
+```
+
+##### [2: List all active jobs, and update the status](https://book.kubebuilder.io/cronjob-tutorial/controller-implementation.html#2-list-all-active-jobs-and-update-the-status)
+
