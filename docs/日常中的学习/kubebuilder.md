@@ -714,4 +714,238 @@ func (r *CronJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 ##### [2: List all active jobs, and update the status](https://book.kubebuilder.io/cronjob-tutorial/controller-implementation.html#2-list-all-active-jobs-and-update-the-status)
 
-11.22
+为了完全更新我们的status，我们需要列出这个namespace中属于这个CronJob的所有子job。与Get类似，我们可以使用List方法来列出子job。注意，我们使用可变参数选项来设置名称空间和字段匹配(这实际上是我们在下面设置的索引查找)。
+
+```go
+   var childJobs kbatch.JobList
+    if err := r.List(ctx, &childJobs, client.InNamespace(req.Namespace), client.MatchingFields{jobOwnerKey: req.Name}); err != nil {
+        log.Error(err, "unable to list child Jobs")
+        return ctrl.Result{}, err
+    }
+
+```
+
+> 这个index是什么？
+>
+> reconciler获取拥有该状态下的cronjob的所有作业。随着cronjobs的增加，查找这些job的速度会变得相当缓慢，因为我们必须过滤所有这些工作。为了更高效地查找，这些作业将在控制器名称上进行本地索引。缓存的作业对象中增加了一个jobOwnerKey字段。这个键引用归属控制器并作为索引。在本文档的后面部分，我们将配置管理器来实际索引这个字段。
+
+一旦我们拥有了所有jobs，我们将它们划分为active、successful和failed的作业，并跟踪最近的运行情况，以便在状态中记录它。请记住，状态应该能够从原来的状态中重新构建，所以从根对象的状态中读取通常不是一个好主意。相反，您应该在每次运行时重新构建它。这就是我们要做的。
+
+我们可以使用状态条件检查一个作业是否“finished”，以及它是成功还是失败。我们将把这个逻辑放到一个helper中，以使我们的代码更清晰。
+
+```go
+    // find the active list of jobs
+    var activeJobs []*kbatch.Job
+    var successfulJobs []*kbatch.Job
+    var failedJobs []*kbatch.Job
+    var mostRecentTime *time.Time // find the last run so we can update the status
+
+    for i, job := range childJobs.Items {
+        _, finishedType := isJobFinished(&job)
+        switch finishedType {
+        case "": // ongoing
+            activeJobs = append(activeJobs, &childJobs.Items[i])
+        case kbatch.JobFailed:
+            failedJobs = append(failedJobs, &childJobs.Items[i])
+        case kbatch.JobComplete:
+            successfulJobs = append(successfulJobs, &childJobs.Items[i])
+        }
+
+        // We'll store the launch time in an annotation, so we'll reconstitute that from
+        // the active jobs themselves.
+        scheduledTimeForJob, err := getScheduledTimeForJob(&job)
+        if err != nil {
+            log.Error(err, "unable to parse schedule time for child job", "job", &job)
+            continue
+        }
+        if scheduledTimeForJob != nil {
+            if mostRecentTime == nil {
+                mostRecentTime = scheduledTimeForJob
+            } else if mostRecentTime.Before(*scheduledTimeForJob) {
+                mostRecentTime = scheduledTimeForJob
+            }
+        }
+    }
+
+    if mostRecentTime != nil {
+        cronJob.Status.LastScheduleTime = &metav1.Time{Time: *mostRecentTime}
+    } else {
+        cronJob.Status.LastScheduleTime = nil
+    }
+    cronJob.Status.Active = nil
+    for _, activeJob := range activeJobs {
+        jobRef, err := ref.GetReference(r.Scheme, activeJob)
+        if err != nil {
+            log.Error(err, "unable to make reference to active job", "job", activeJob)
+            continue
+        }
+        cronJob.Status.Active = append(cronJob.Status.Active, *jobRef)
+    }
+```
+
+这里，我们将记录在稍高一些的日志级别上观察到的作业数量，以便进行调试。注意，我们没有使用格式字符串，而是使用固定的消息，并将键值对与额外的信息附加在一起。这使得过滤和查询日志行变得更加容易。
+
+```go
+ log.V(1).Info("job count", "active jobs", len(activeJobs), "successful jobs", len(successfulJobs), "failed jobs", len(failedJobs))
+```
+
+使用我们收集的日期，我们将更新我们的CRD的状态。和以前一样，我们利用clinet。为了具体地更新status子资源，我们将使用client的status部分和update方法。
+
+status子资源忽略对spec的更改，因此它不太可能与任何其他更新冲突，并且可以拥有单独的权限。
+
+```go
+if err := r.Status().Update(ctx, &cronJob); err != nil {
+        log.Error(err, "unable to update CronJob status")
+        return ctrl.Result{}, err
+    }
+```
+
+#### [3: Clean up old jobs according to the history limit](https://book.kubebuilder.io/cronjob-tutorial/controller-implementation.html#3-clean-up-old-jobs-according-to-the-history-limit)
+
+首先，我们要努力清理旧的jobs，这样我们就不会留下太多的垃圾
+
+```go
+  // NB: deleting these is "best effort" -- if we fail on a particular one,
+    // we won't requeue just to finish the deleting.
+    if cronJob.Spec.FailedJobsHistoryLimit != nil {
+        sort.Slice(failedJobs, func(i, j int) bool {
+            if failedJobs[i].Status.StartTime == nil {
+                return failedJobs[j].Status.StartTime != nil
+            }
+            return failedJobs[i].Status.StartTime.Before(failedJobs[j].Status.StartTime)
+        })
+        for i, job := range failedJobs {
+            if int32(i) >= int32(len(failedJobs))-*cronJob.Spec.FailedJobsHistoryLimit {
+                break
+            }
+            if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
+                log.Error(err, "unable to delete old failed job", "job", job)
+            } else {
+                log.V(0).Info("deleted old failed job", "job", job)
+            }
+        }
+    }
+
+    if cronJob.Spec.SuccessfulJobsHistoryLimit != nil {
+        sort.Slice(successfulJobs, func(i, j int) bool {
+            if successfulJobs[i].Status.StartTime == nil {
+                return successfulJobs[j].Status.StartTime != nil
+            }
+            return successfulJobs[i].Status.StartTime.Before(successfulJobs[j].Status.StartTime)
+        })
+        for i, job := range successfulJobs {
+            if int32(i) >= int32(len(successfulJobs))-*cronJob.Spec.SuccessfulJobsHistoryLimit {
+                break
+            }
+            if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); (err) != nil {
+                log.Error(err, "unable to delete old successful job", "job", job)
+            } else {
+                log.V(0).Info("deleted old successful job", "job", job)
+            }
+        }
+    }
+
+```
+
+#### [4: Check if we’re suspended](https://book.kubebuilder.io/cronjob-tutorial/controller-implementation.html#4-check-if-were-suspended)
+
+如果这个对象被挂起，我们就不想运行任何job，所以立刻停止。如果正在运行的job出现故障，并且我们希望暂停运行以调查或处理集群，而不删除对象，这将非常有用。
+
+```go
+if cronJob.Spec.Suspend != nil && *cronJob.Spec.Suspend {
+        log.V(1).Info("cronjob suspended, skipping")
+        return ctrl.Result{}, nil
+    }
+```
+
+#### [5: Get the next scheduled run](https://book.kubebuilder.io/cronjob-tutorial/controller-implementation.html#5-get-the-next-scheduled-run)
+
+如果我们没有暂停，我们将需要计算下一次预定的运行，以及我们是否有一个尚未处理的运行。
+
+```go
+// figure out the next times that we need to create
+    // jobs at (or anything we missed).
+    missedRun, nextRun, err := getNextSchedule(&cronJob, r.Now())
+    if err != nil {
+        log.Error(err, "unable to figure out CronJob schedule")
+        // we don't really care about requeuing until we get an update that
+        // fixes the schedule, so don't return an error
+        return ctrl.Result{}, nil
+    }
+```
+
+我们将准备最终的请求，以便在下一次job之前重新请求，然后确定是否确实需要运行。
+
+```go
+scheduledResult := ctrl.Result{RequeueAfter: nextRun.Sub(r.Now())} // save this so we can re-use it elsewhere
+    log = log.WithValues("now", r.Now(), "next run", nextRun)
+```
+
+#### [6: Run a new job if it’s on schedule, not past the deadline, and not blocked by our concurrency policy](https://book.kubebuilder.io/cronjob-tutorial/controller-implementation.html#6-run-a-new-job-if-its-on-schedule-not-past-the-deadline-and-not-blocked-by-our-concurrency-policy)
+
+如果我们错过了一次运行，而我们仍然在启动它的最后期限内，我们将需要运行一个job。
+
+```go
+  if missedRun.IsZero() {
+        log.V(1).Info("no upcoming scheduled times, sleeping until next")
+        return scheduledResult, nil
+    }
+
+    // make sure we're not too late to start the run
+    log = log.WithValues("current run", missedRun)
+    tooLate := false
+    if cronJob.Spec.StartingDeadlineSeconds != nil {
+        tooLate = missedRun.Add(time.Duration(*cronJob.Spec.StartingDeadlineSeconds) * time.Second).Before(r.Now())
+    }
+    if tooLate {
+        log.V(1).Info("missed starting deadline for last run, sleeping till next")
+        // TODO(directxman12): events
+        return scheduledResult, nil
+    }
+```
+
+如果我们确实必须运行一个job，我们将需要等待现有job完成，替换现有job，或者只是添加新的job。如果我们的信息由于缓存延迟而过时，当我们获得最新的信息时，我们将获得一个requeue。
+
+```go
+  // figure out how to run this job -- concurrency policy might forbid us from running
+    // multiple at the same time...
+    if cronJob.Spec.ConcurrencyPolicy == batchv1.ForbidConcurrent && len(activeJobs) > 0 {
+        log.V(1).Info("concurrency policy blocks concurrent runs, skipping", "num active", len(activeJobs))
+        return scheduledResult, nil
+    }
+
+    // ...or instruct us to replace existing ones...
+    if cronJob.Spec.ConcurrencyPolicy == batchv1.ReplaceConcurrent {
+        for _, activeJob := range activeJobs {
+            // we don't care if the job was already deleted
+            if err := r.Delete(ctx, activeJob, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
+                log.Error(err, "unable to delete active job", "job", activeJob)
+                return ctrl.Result{}, err
+            }
+        }
+    }
+
+```
+
+一旦我们弄清楚如何处理现有的job，我们实际上就会创造出我们想要的job
+
+```go
+// actually make the job...
+    job, err := constructJobForCronJob(&cronJob, missedRun)
+    if err != nil {
+        log.Error(err, "unable to construct job from template")
+        // don't bother requeuing until we get a change to the spec
+        return scheduledResult, nil
+    }
+
+    // ...and create it on the cluster
+    if err := r.Create(ctx, job); err != nil {
+        log.Error(err, "unable to create Job for CronJob", "job", job)
+        return ctrl.Result{}, err
+    }
+
+    log.V(1).Info("created Job for CronJob run", "job", job)
+```
+
+#### [7: Requeue when we either see a running job or it’s time for the next scheduled run](https://book.kubebuilder.io/cronjob-tutorial/controller-implementation.html#7-requeue-when-we-either-see-a-running-job-or-its-time-for-the-next-scheduled-run)
+
