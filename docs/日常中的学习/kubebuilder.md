@@ -949,3 +949,230 @@ scheduledResult := ctrl.Result{RequeueAfter: nextRun.Sub(r.Now())} // save this 
 
 #### [7: Requeue when we either see a running job or it’s time for the next scheduled run](https://book.kubebuilder.io/cronjob-tutorial/controller-implementation.html#7-requeue-when-we-either-see-a-running-job-or-its-time-for-the-next-scheduled-run)
 
+最后，我们将返回上面执行的结果，这表示当需要进行下一次运行时，我们想要重新排队。这被视为最大期限——如果在这期间有其他事情发生变化，比如我们的工作开始或结束，被修改，等等，我们可能会更快地再次reconcile。
+
+```go
+   // we'll requeue once we see the running job, and update our status
+    return scheduledResult, nil
+}
+
+```
+
+#### [Setup](https://book.kubebuilder.io/cronjob-tutorial/controller-implementation.html#setup)
+
+最后，我们将更新setup。为了让我们的reconciler程序能够快速地通过其所有者找到Jobs，我们需要一个index。我们声明一个索引键，稍后可以在client中将其用作伪字段名，然后描述如何从Job对象中提取索引值。索引器将自动为我们处理namespace，所以如果Job被CronJob所拥有，我们只需要提取所有者的name。
+
+此外，我们将通知manager这个contronller拥有一些Job，这样当Job发生变化、被删除等时，它将自动调用底层CronJob上的Reconcile。
+
+```go
+var (
+    jobOwnerKey = ".metadata.controller"
+    apiGVStr    = batchv1.GroupVersion.String()
+)
+
+func (r *CronJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
+    // set up a real clock, since we're not in a test
+    if r.Clock == nil {
+        r.Clock = realClock{}
+    }
+
+    if err := mgr.GetFieldIndexer().IndexField(context.Background(), &kbatch.Job{}, jobOwnerKey, func(rawObj client.Object) []string {
+        // grab the job object, extract the owner...
+        job := rawObj.(*kbatch.Job)
+        owner := metav1.GetControllerOf(job)
+        if owner == nil {
+            return nil
+        }
+        // ...make sure it's a CronJob...
+        if owner.APIVersion != apiGVStr || owner.Kind != "CronJob" {
+            return nil
+        }
+
+        // ...and if so, return it
+        return []string{owner.Name}
+    }); err != nil {
+        return err
+    }
+
+    return ctrl.NewControllerManagedBy(mgr).
+        For(&batchv1.CronJob{}).
+        Owns(&kbatch.Job{}).
+        Complete(r)
+}
+
+```
+
+这很了不起，但现在我们有了一个工作控制器。让我们针对集群进行测试，然后，如果没有任何问题，就部署它!
+
+### [You said something about main?](https://book.kubebuilder.io/cronjob-tutorial/main-revisited.html#you-said-something-about-main)
+
+但首先，记得我们说过要回到`main.go`。再去一次吗?让我们看看有什么变化，以及我们需要添加什么。
+
+```go
+package main
+
+import (
+    "flag"
+    "os"
+
+    // Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
+    // to ensure that exec-entrypoint and run can make use of them.
+    _ "k8s.io/client-go/plugin/pkg/client/auth"
+
+    "k8s.io/apimachinery/pkg/runtime"
+    utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+    clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+    ctrl "sigs.k8s.io/controller-runtime"
+    "sigs.k8s.io/controller-runtime/pkg/healthz"
+    "sigs.k8s.io/controller-runtime/pkg/log/zap"
+
+    batchv1 "tutorial.kubebuilder.io/project/api/v1"
+    "tutorial.kubebuilder.io/project/controllers"
+    //+kubebuilder:scaffold:imports
+)
+```
+
+要注意的第一个区别是kubebuilder将新的API组的包(batchv1)添加到我们的scheme中。这意味着我们可以在contronller中使用这些对象
+
+如果我们要使用任何其他的CRD，我们将不得不以同样的方式添加它们的scheme。诸如Job之类的内置类型的方案由`clientgoscheme`添加。
+
+```go
+var (
+    scheme   = runtime.NewScheme()
+    setupLog = ctrl.Log.WithName("setup")
+)
+
+func init() {
+    utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+
+    utilruntime.Must(batchv1.AddToScheme(scheme))
+    //+kubebuilder:scaffold:scheme
+}
+```
+
+另一个改变是kubebuilder添加了一个调用CronJob的controller的SetupWithManager方法的块。
+
+```go
+func main() {
+//old stuff
+    var metricsAddr string
+    var enableLeaderElection bool
+    var probeAddr string
+    flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
+    flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+    flag.BoolVar(&enableLeaderElection, "leader-elect", false,
+        "Enable leader election for controller manager. "+
+            "Enabling this will ensure there is only one active controller manager.")
+
+    opts := zap.Options{
+        Development: true,
+    }
+    opts.BindFlags(flag.CommandLine)
+    flag.Parse()
+
+    ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+    mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+        Scheme:                 scheme,
+        MetricsBindAddress:     metricsAddr,
+        Port:                   9443,
+        HealthProbeBindAddress: probeAddr,
+        LeaderElection:         enableLeaderElection,
+        LeaderElectionID:       "80807133.tutorial.kubebuilder.io",
+    })
+    if err != nil {
+        setupLog.Error(err, "unable to start manager")
+        os.Exit(1)
+    }
+
+if err = (&controllers.CronJobReconciler{
+        Client: mgr.GetClient(),
+        Scheme: mgr.GetScheme(),
+    }).SetupWithManager(mgr); err != nil {
+        setupLog.Error(err, "unable to create controller", "controller", "CronJob")
+        os.Exit(1)
+    }
+```
+
+我们还将为我们的类型设置webhooks，我们将在后面讨论。我们只需要将它们添加到manager中。因为我们可能想要单独运行webhook，或者在本地测试controller时不运行它们，所以我们将它们放在一个环境变量后面。
+
+我们要确保在本地运行时设置`ENABLE_WEBHOOKS=false`。
+
+```go
+ if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+        if err = (&batchv1.CronJob{}).SetupWebhookWithManager(mgr); err != nil {
+            setupLog.Error(err, "unable to create webhook", "webhook", "CronJob")
+            os.Exit(1)
+        }
+    }
+    //+kubebuilder:scaffold:builder
+
+    if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+        setupLog.Error(err, "unable to set up health check")
+        os.Exit(1)
+    }
+    if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+        setupLog.Error(err, "unable to set up ready check")
+        os.Exit(1)
+    }
+
+    setupLog.Info("starting manager")
+    if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+        setupLog.Error(err, "problem running manager")
+        os.Exit(1)
+    }
+}
+```
+
+现在我们可以实现contronller了。
+
+#### [Implementing defaulting/validating webhooks](https://book.kubebuilder.io/cronjob-tutorial/webhook-implementation.html#implementing-defaultingvalidating-webhooks)
+
+如果你想为你的CRD实现准入webhook，你唯一需要做的就是实现`Defaulter`和(或)`Validator`接口。
+
+kubebuilder 会帮助你处理剩下的事，比如：
+
+1.创建webhook服务器。
+
+2.确保服务器已经添加到controller中。
+
+3.为webhook创建处理程序。
+
+4.用服务器中的路径注册每个处理程序。
+
+首先，让我们为CRD (CronJob)搭建webhook。我们需要使用`--default`和`--programming -validation`标志运行以下命令(因为我们的测试项目将使用默认和验证的webhook):
+
+```go
+kubebuilder create webhook --group batch --version v1 --kind CronJob --defaulting --programmatic-validation
+
+```
+
+这将scaffold这个webhook函数，并将您的webhook注册到main.go的controller中。
+
+##### [Supporting older cluster versions](https://book.kubebuilder.io/cronjob-tutorial/webhook-implementation.html#supporting-older-cluster-versions)
+
+> 与Go webhook实现一起创建的默认WebhookConfiguration清单使用API版本v1。如果您的项目打算支持比v1.16更早的Kubernetes集群版本，请设置——webhook-version v1beta1。更多信息请参见webhook参考。
+
+```go
+package v1
+
+import (
+    "github.com/robfig/cron"
+    apierrors "k8s.io/apimachinery/pkg/api/errors"
+    "k8s.io/apimachinery/pkg/runtime"
+    "k8s.io/apimachinery/pkg/runtime/schema"
+    validationutils "k8s.io/apimachinery/pkg/util/validation"
+    "k8s.io/apimachinery/pkg/util/validation/field"
+    ctrl "sigs.k8s.io/controller-runtime"
+    logf "sigs.k8s.io/controller-runtime/pkg/log"
+    "sigs.k8s.io/controller-runtime/pkg/webhook"
+)
+
+```
+
+接下来，我们将为webhook设置一个日志记录器。
+
+```go
+var cronjoblog = logf.Log.WithName("cronjob-resource")
+```
+
