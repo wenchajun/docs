@@ -969,4 +969,182 @@ kubectl get pods --field-selector=status.phase!=Running,spec.restartPolicy=Alway
 kubectl get statefulsets,services --all-namespaces --field-selector metadata.namespace!=default
 ```
 
-https://kubernetes.io/zh/docs/concepts/overview/working-with-objects/owners-dependents/
+# 属主与附属
+
+在 Kubernetes 中，一些对象是其他对象的*属主（Owner）*。 例如，[ReplicaSet](https://kubernetes.io/zh/docs/concepts/workloads/controllers/replicaset/) 是一组 Pod 的属主。 具有属主的对象是属主的*附属（Dependent）* 。
+
+属主关系不同于一些资源使用的[标签和选择算符](https://kubernetes.io/zh/docs/concepts/overview/working-with-objects/labels/)机制。 例如，有一个创建 `EndpointSlice` 对象的 Service， 该 Service 使用标签来让控制平面确定，哪些 `EndpointSlice` 对象属于该 Service。 除开标签，每个代表 Service 所管理的 `EndpointSlice` 都有一个属主引用。 属主引用避免 Kubernetes 的不同部分干扰到不受它们控制的对象。
+
+## 对象规约中的属主引用 
+
+附属对象有一个 `metadata.ownerReferences` 字段，用于引用其属主对象。 一个有效的属主引用，包含与附属对象同在一个命名空间下的对象名称和一个 UID。 Kubernetes 自动为一些对象的附属资源设置属主引用的值， 这些对象包含 ReplicaSet、DaemonSet、Deployment、Job、CronJob、ReplicationController 等。 你也可以通过改变这个字段的值，来手动配置这些关系。 然而，你通常不需要这么做，你可以让 Kubernetes 自动管理附属关系。
+
+附属对象还有一个 `ownerReferences.blockOwnerDeletion` 字段，该字段使用布尔值， 用于控制特定的附属对象是否可以阻止垃圾收集删除其属主对象。 如果[控制器](https://kubernetes.io/zh/docs/concepts/architecture/controller/)（例如 Deployment 控制器） 设置了 `metadata.ownerReferences` 字段的值，Kubernetes 会自动设置 `blockOwnerDeletion` 的值为 `true`。 你也可以手动设置 `blockOwnerDeletion` 字段的值，以控制哪些附属对象会阻止垃圾收集。
+
+**说明：**
+
+根据设计，kubernetes 不允许跨名字空间指定属主。 名字空间范围的附属可以指定集群范围的或者名字空间范围的属主。 名字空间范围的属主**必须**和该附属处于相同的名字空间。 如果名字空间范围的属主和附属不在相同的名字空间，那么该属主引用就会被认为是缺失的， 并且当附属的所有属主引用都被确认不再存在之后，该附属就会被删除。
+
+集群范围的附属只能指定集群范围的属主。 在 v1.20+ 版本，如果一个集群范围的附属指定了一个名字空间范围类型的属主， 那么该附属就会被认为是拥有一个不可解析的属主引用，并且它不能够被垃圾回收。
+
+在 v1.20+ 版本，如果垃圾收集器检测到无效的跨名字空间的属主引用， 或者一个集群范围的附属指定了一个名字空间范围类型的属主， 那么它就会报告一个警告事件。该事件的原因是 `OwnerRefInvalidNamespace`， `involvedObject` 属性中包含无效的附属。 你可以运行 `kubectl get events -A --field-selector=reason=OwnerRefInvalidNamespace` 来获取该类型的事件。
+
+## 属主关系与 Finalizer 
+
+当你告诉 Kubernetes 删除一个资源，API 服务器允许管理控制器处理该资源的任何 [Finalizer 规则](https://kubernetes.io/zh/docs/concepts/overview/working-with-objects/finalizers/)。 [Finalizer](https://kubernetes.io/zh/docs/concepts/overview/working-with-objects/finalizers/) 防止意外删除你的集群所依赖的、用于正常运作的资源。 例如，如果你试图删除一个仍被 Pod 使用的 `PersistentVolume`，该资源不会被立即删除， 因为 `PersistentVolume` 有 `kubernetes.io/pv-protection` Finalizer。 相反，它将进入 `Terminating` 状态，直到 Kubernetes 清除这个 Finalizer， 而这种情况只会发生在 `PersistentVolume` 不再被挂载到 Pod 上时。
+
+当你使用[前台或孤立级联删除](https://kubernetes.io/zh/docs/concepts/architecture/garbage-collection/#cascading-deletion)时， Kubernetes 也会向属主资源添加 Finalizer。 在前台删除中，会添加 `foreground` Finalizer，这样控制器必须在删除了拥有 `ownerReferences.blockOwnerDeletion=true` 的附属资源后，才能删除属主对象。 如果你指定了孤立删除策略，Kubernetes 会添加 `orphan` Finalizer， 这样控制器在删除属主对象后，会忽略附属资源。
+
+# 推荐使用的标签
+
+除了 kubectl 和 dashboard 之外，您可以使用其他工具来可视化和管理 Kubernetes 对象。一组通用的标签可以让多个工具之间相互操作，用所有工具都能理解的通用方式描述对象。
+
+除了支持工具外，推荐的标签还以一种可以查询的方式描述了应用程序。
+
+元数据围绕 *应用（application）* 的概念进行组织。Kubernetes 不是 平台即服务（PaaS），没有或强制执行正式的应用程序概念。 相反，应用程序是非正式的，并使用元数据进行描述。应用程序包含的定义是松散的。
+
+**说明：**
+
+这些是推荐的标签。它们使管理应用程序变得更容易但不是任何核心工具所必需的。
+
+共享标签和注解都使用同一个前缀：`app.kubernetes.io`。没有前缀的标签是用户私有的。共享前缀可以确保共享标签不会干扰用户自定义的标签。
+
+## 标签
+
+为了充分利用这些标签，应该在每个资源对象上都使用它们。
+
+| 键                             | 描述                                               | 示例                 | 类型   |
+| ------------------------------ | -------------------------------------------------- | -------------------- | ------ |
+| `app.kubernetes.io/name`       | 应用程序的名称                                     | `mysql`              | 字符串 |
+| `app.kubernetes.io/instance`   | 用于唯一确定应用实例的名称                         | `mysql-abcxzy`       | 字符串 |
+| `app.kubernetes.io/version`    | 应用程序的当前版本（例如，语义版本，修订版哈希等） | `5.7.21`             | 字符串 |
+| `app.kubernetes.io/component`  | 架构中的组件                                       | `database`           | 字符串 |
+| `app.kubernetes.io/part-of`    | 此级别的更高级别应用程序的名称                     | `wordpress`          | 字符串 |
+| `app.kubernetes.io/managed-by` | 用于管理应用程序的工具                             | `helm`               | 字符串 |
+| `app.kubernetes.io/created-by` | 创建该资源的控制器或者用户                         | `controller-manager` | 字符串 |
+
+为说明这些标签的实际使用情况，请看下面的 StatefulSet 对象：
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/instance: mysql-abcxzy
+    app.kubernetes.io/version: "5.7.21"
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: wordpress
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/created-by: controller-manager
+```
+
+## 应用和应用实例
+
+应用可以在 Kubernetes 集群中安装一次或多次。在某些情况下，可以安装在同一命名空间中。例如，可以不止一次地为不同的站点安装不同的 WordPress。
+
+应用的名称和实例的名称是分别记录的。例如，WordPress 应用的 `app.kubernetes.io/name` 为 `wordpress`，而其实例名称 `app.kubernetes.io/instance` 为 `wordpress-abcxzy`。 这使得应用和应用的实例均可被识别，应用的每个实例都必须具有唯一的名称。
+
+## 示例
+
+为了说明使用这些标签的不同方式，以下示例具有不同的复杂性。
+
+### 一个简单的无状态服务
+
+考虑使用 `Deployment` 和 `Service` 对象部署的简单无状态服务的情况。以下两个代码段表示如何以最简单的形式使用标签。
+
+下面的 `Deployment` 用于监督运行应用本身的 pods。
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: myservice
+    app.kubernetes.io/instance: myservice-abcxzy
+...
+```
+
+下面的 `Service` 用于暴露应用。
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/name: myservice
+    app.kubernetes.io/instance: myservice-abcxzy
+...
+```
+
+### 带有一个数据库的 Web 应用程序
+
+考虑一个稍微复杂的应用：一个使用 Helm 安装的 Web 应用（WordPress），其中 使用了数据库（MySQL）。以下代码片段说明用于部署此应用程序的对象的开始。
+
+以下 `Deployment` 的开头用于 WordPress：
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: wordpress
+    app.kubernetes.io/instance: wordpress-abcxzy
+    app.kubernetes.io/version: "4.9.4"
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/component: server
+    app.kubernetes.io/part-of: wordpress
+...
+```
+
+这个 `Service` 用于暴露 WordPress：
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/name: wordpress
+    app.kubernetes.io/instance: wordpress-abcxzy
+    app.kubernetes.io/version: "4.9.4"
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/component: server
+    app.kubernetes.io/part-of: wordpress
+...
+```
+
+MySQL 作为一个 `StatefulSet` 暴露，包含它和它所属的较大应用程序的元数据：
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/instance: mysql-abcxzy
+    app.kubernetes.io/version: "5.7.21"
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: wordpress
+...
+```
+
+`Service` 用于将 MySQL 作为 WordPress 的一部分暴露：
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/instance: mysql-abcxzy
+    app.kubernetes.io/version: "5.7.21"
+    app.kubernetes.io/managed-by: helm
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: wordpress
+...
+```
+
+使用 MySQL `StatefulSet` 和 `Service`，您会注意到有关 MySQL 和 Wordpress 的信息，包括更广泛的应用程序。
+
+https://kubernetes.io/zh/docs/tasks/administer-cluster/migrating-from-dockershim/
