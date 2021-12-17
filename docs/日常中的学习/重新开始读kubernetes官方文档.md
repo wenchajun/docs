@@ -1148,3 +1148,290 @@ metadata:
 使用 MySQL `StatefulSet` 和 `Service`，您会注意到有关 MySQL 和 Wordpress 的信息，包括更广泛的应用程序。
 
 https://kubernetes.io/zh/docs/tasks/administer-cluster/migrating-from-dockershim/
+
+# 节点
+
+Kubernetes 通过将容器放入在节点（Node）上运行的 Pod 中来执行你的工作负载。 节点可以是一个虚拟机或者物理机器，取决于所在的集群配置。 每个节点包含运行 [Pods](https://kubernetes.io/docs/concepts/workloads/pods/pod-overview/) 所需的服务； 这些节点由 [控制面](https://kubernetes.io/zh/docs/reference/glossary/?all=true#term-control-plane) 负责管理。
+
+通常集群中会有若干个节点；而在一个学习用或者资源受限的环境中，你的集群中也可能 只有一个节点。
+
+节点上的[组件](https://kubernetes.io/zh/docs/concepts/overview/components/#node-components)包括 [kubelet](https://kubernetes.io/docs/reference/generated/kubelet)、 [容器运行时](https://kubernetes.io/zh/docs/setup/production-environment/container-runtimes)以及 [kube-proxy](https://kubernetes.io/zh/docs/reference/command-line-tools-reference/kube-proxy/)。
+
+## 管理 
+
+向 [API 服务器](https://kubernetes.io/zh/docs/reference/command-line-tools-reference/kube-apiserver/)添加节点的方式主要有两种：
+
+1. 节点上的 `kubelet` 向控制面执行自注册；
+2. 你，或者别的什么人，手动添加一个 Node 对象。
+
+在你创建了 Node 对象或者节点上的 `kubelet` 执行了自注册操作之后， 控制面会检查新的 Node 对象是否合法。例如，如果你使用下面的 JSON 对象来创建 Node 对象：
+
+```json
+{
+  "kind": "Node",
+  "apiVersion": "v1",
+  "metadata": {
+    "name": "10.240.79.157",
+    "labels": {
+      "name": "my-first-k8s-node"
+    }
+  }
+}
+```
+
+Kubernetes 会在内部创建一个 Node 对象作为节点的表示。Kubernetes 检查 `kubelet` 向 API 服务器注册节点时使用的 `metadata.name` 字段是否匹配。 如果节点是健康的（即所有必要的服务都在运行中），则该节点可以用来运行 Pod。 否则，直到该节点变为健康之前，所有的集群活动都会忽略该节点。
+
+**说明：** Kubernetes 会一直保存着非法节点对应的对象，并持续检查该节点是否已经 变得健康。 你，或者某个[控制器](https://kubernetes.io/zh/docs/concepts/architecture/controller/)必需显式地 删除该 Node 对象以停止健康检查操作。
+
+Node 对象的名称必须是合法的 [DNS 子域名](https://kubernetes.io/zh/docs/concepts/overview/working-with-objects/names#dns-subdomain-names)。
+
+### 节点自注册
+
+当 kubelet 标志 `--register-node` 为 true（默认）时，它会尝试向 API 服务注册自己。 这是首选模式，被绝大多数发行版选用。
+
+对于自注册模式，kubelet 使用下列参数启动：
+
+- `--kubeconfig` - 用于向 API 服务器表明身份的凭据路径。
+- `--cloud-provider` - 与某[云驱动](https://kubernetes.io/zh/docs/reference/glossary/?all=true#term-cloud-provider) 进行通信以读取与自身相关的元数据的方式。
+- `--register-node` - 自动向 API 服务注册。
+- `--register-with-taints` - 使用所给的污点列表（逗号分隔的 `<key>=<value>:<effect>`）注册节点。 当 `register-node` 为 false 时无效。
+- `--node-ip` - 节点 IP 地址。
+- `--node-labels` - 在集群中注册节点时要添加的 [标签](https://kubernetes.io/zh/docs/concepts/overview/working-with-objects/labels/)。 （参见 [NodeRestriction 准入控制插件](https://kubernetes.io/zh/docs/reference/access-authn-authz/admission-controllers/#noderestriction)所实施的标签限制）。
+- `--node-status-update-frequency` - 指定 kubelet 向控制面发送状态的频率。
+
+启用[节点授权模式](https://kubernetes.io/zh/docs/reference/access-authn-authz/node/)和 [NodeRestriction 准入插件](https://kubernetes.io/zh/docs/reference/access-authn-authz/admission-controllers/#noderestriction) 时，仅授权 `kubelet` 创建或修改其自己的节点资源。
+
+### 手动节点管理
+
+你可以使用 [kubectl](https://kubernetes.io/docs/user-guide/kubectl-overview/) 来创建和修改 Node 对象。
+
+如果你希望手动创建节点对象时，请设置 kubelet 标志 `--register-node=false`。
+
+你可以修改 Node 对象（忽略 `--register-node` 设置）。 例如，修改节点上的标签或标记其为不可调度。
+
+你可以结合使用节点上的标签和 Pod 上的选择算符来控制调度。 例如，你可以限制某 Pod 只能在符合要求的节点子集上运行。
+
+如果标记节点为不可调度（unschedulable），将阻止新 Pod 调度到该节点之上，但不会 影响任何已经在其上的 Pod。 这是重启节点或者执行其他维护操作之前的一个有用的准备步骤。
+
+要标记一个节点为不可调度，执行以下命令：
+
+```shell
+kubectl cordon $NODENAME
+```
+
+更多细节参考[安全腾空节点](https://kubernetes.io/zh/docs/tasks/administer-cluster/safely-drain-node/)。
+
+**说明：** 被 [DaemonSet](https://kubernetes.io/zh/docs/concepts/workloads/controllers/daemonset/) 控制器创建的 Pod 能够容忍节点的不可调度属性。 DaemonSet 通常提供节点本地的服务，即使节点上的负载应用已经被腾空，这些服务也仍需 运行在节点之上。
+
+## 节点状态 
+
+一个节点的状态包含以下信息:
+
+- [地址](https://kubernetes.io/zh/docs/concepts/architecture/nodes/#addresses)
+- [状况](https://kubernetes.io/zh/docs/concepts/architecture/nodes/#condition)
+- [容量与可分配](https://kubernetes.io/zh/docs/concepts/architecture/nodes/#capacity)
+- [信息](https://kubernetes.io/zh/docs/concepts/architecture/nodes/#info)
+
+你可以使用 `kubectl` 来查看节点状态和其他细节信息：
+
+```shell
+kubectl describe node <节点名称>
+```
+
+下面对每个部分进行详细描述。
+
+### 地址 
+
+这些字段的用法取决于你的云服务商或者物理机配置。
+
+- HostName：由节点的内核设置。可以通过 kubelet 的 `--hostname-override` 参数覆盖。
+- ExternalIP：通常是节点的可外部路由（从集群外可访问）的 IP 地址。
+- InternalIP：通常是节点的仅可在集群内部路由的 IP 地址。
+
+### 状况
+
+`conditions` 字段描述了所有 `Running` 节点的状态。状况的示例包括：
+
+| 节点状况             | 描述                                                         |
+| -------------------- | ------------------------------------------------------------ |
+| `Ready`              | 如节点是健康的并已经准备好接收 Pod 则为 `True`；`False` 表示节点不健康而且不能接收 Pod；`Unknown` 表示节点控制器在最近 `node-monitor-grace-period` 期间（默认 40 秒）没有收到节点的消息 |
+| `DiskPressure`       | `True` 表示节点存在磁盘空间压力，即磁盘可用量低, 否则为 `False` |
+| `MemoryPressure`     | `True` 表示节点存在内存压力，即节点内存可用量低，否则为 `False` |
+| `PIDPressure`        | `True` 表示节点存在进程压力，即节点上进程过多；否则为 `False` |
+| `NetworkUnavailable` | `True` 表示节点网络配置不正确；否则为 `False`                |
+
+**说明：** 如果使用命令行工具来打印已保护（Cordoned）节点的细节，其中的 Condition 字段可能 包括 `SchedulingDisabled`。`SchedulingDisabled` 不是 Kubernetes API 中定义的 Condition，被保护起来的节点在其规约中被标记为不可调度（Unschedulable）。
+
+在 Kubernetes API 中，节点的状况表示节点资源中`.status` 的一部分。 例如，以下 JSON 结构描述了一个健康节点：
+
+```json
+"conditions": [
+  {
+    "type": "Ready",
+    "status": "True",
+    "reason": "KubeletReady",
+    "message": "kubelet is posting ready status",
+    "lastHeartbeatTime": "2019-06-05T18:38:35Z",
+    "lastTransitionTime": "2019-06-05T11:41:27Z"
+  }
+]
+```
+
+如果 Ready 条件的 `status` 处于 `Unknown` 或者 `False` 状态的时间超过了 `pod-eviction-timeout` 值， （一个传递给 [kube-controller-manager](https://kubernetes.io/docs/reference/generated/kube-controller-manager/) 的参数）， [节点控制器](https://kubernetes.io/zh/docs/concepts/architecture/nodes/#node-controller) 会对节点上的所有 Pod 触发 [API-发起的驱逐](https://kubernetes.io/zh/docs/concepts/scheduling-eviction/pod-eviction/#api-eviction)。 默认的逐出超时时长为 **5 分钟**。 某些情况下，当节点不可达时，API 服务器不能和其上的 kubelet 通信。 删除 Pod 的决定不能传达给 kubelet，直到它重新建立和 API 服务器的连接为止。 与此同时，被计划删除的 Pod 可能会继续在游离的节点上运行。
+
+节点控制器在确认 Pod 在集群中已经停止运行前，不会强制删除它们。 你可以看到这些可能在无法访问的节点上运行的 Pod 处于 `Terminating` 或者 `Unknown` 状态。 如果 kubernetes 不能基于下层基础设施推断出某节点是否已经永久离开了集群， 集群管理员可能需要手动删除该节点对象。 从 Kubernetes 删除节点对象将导致 API 服务器删除节点上所有运行的 Pod 对象并释放它们的名字。
+
+节点生命周期控制器会自动创建代表状况的 [污点](https://kubernetes.io/zh/docs/concepts/scheduling-eviction/taint-and-toleration/)。 当调度器将 Pod 指派给某节点时，会考虑节点上的污点。 Pod 则可以通过容忍度（Toleration）表达所能容忍的污点。
+
+### 容量与可分配
+
+描述节点上的可用资源：CPU、内存和可以调度到节点上的 Pod 的个数上限。
+
+`capacity` 块中的字段标示节点拥有的资源总量。 `allocatable` 块指示节点上可供普通 Pod 消耗的资源量。
+
+可以在学习如何在节点上[预留计算资源](https://kubernetes.io/zh/docs/tasks/administer-cluster/reserve-compute-resources/#node-allocatable) 的时候了解有关容量和可分配资源的更多信息。
+
+### 信息
+
+描述节点的一般信息，如内核版本、Kubernetes 版本（`kubelet` 和 `kube-proxy` 版本）、 容器运行时详细信息，以及 节点使用的操作系统。 `kubelet` 从节点收集这些信息并将其发布到 Kubernetes API。
+
+## 心跳 
+
+Kubernetes 节点发送的心跳帮助你的集群确定每个节点的可用性，并在检测到故障时采取行动。
+
+对于节点，有两种形式的心跳:
+
+- 更新节点的 `.status`
+- [Lease](https://kubernetes.io/docs/reference/kubernetes-api/cluster-resources/lease-v1/) 对象 在 `kube-node-lease` [命名空间](https://kubernetes.io/zh/docs/concepts/overview/working-with-objects/namespaces/)中。 每个节点都有一个关联的 Lease 对象。
+
+与 Node 的 `.status` 更新相比，`Lease` 是一种轻量级资源。 使用 `Leases` 心跳在大型集群中可以减少这些更新对性能的影响。
+
+kubelet 负责创建和更新节点的 `.status`，以及更新它们对应的 `Lease`。
+
+- 当状态发生变化时，或者在配置的时间间隔内没有更新事件时，kubelet 会更新 `.status`。 `.status` 更新的默认间隔为 5 分钟（比不可达节点的 40 秒默认超时时间长很多）。
+- `kubelet` 会每 10 秒（默认更新间隔时间）创建并更新其 `Lease` 对象。 `Lease` 更新独立于 `NodeStatus` 更新而发生。 如果 `Lease` 的更新操作失败，`kubelet` 会采用指数回退机制，从 200 毫秒开始 重试，最长重试间隔为 7 秒钟。
+
+## 节点控制器 
+
+节点[控制器](https://kubernetes.io/zh/docs/concepts/architecture/controller/)是 Kubernetes 控制面组件，管理节点的方方面面。
+
+节点控制器在节点的生命周期中扮演多个角色。 第一个是当节点注册时为它分配一个 CIDR 区段（如果启用了 CIDR 分配）。
+
+第二个是保持节点控制器内的节点列表与云服务商所提供的可用机器列表同步。 如果在云环境下运行，只要某节点不健康，节点控制器就会询问云服务是否节点的虚拟机仍可用。 如果不可用，节点控制器会将该节点从它的节点列表删除。
+
+第三个是监控节点的健康状况。 节点控制器是负责：
+
+- 在节点节点不可达的情况下，在 Node 的 `.status` 中更新 `NodeReady` 状况。 在这种情况下，节点控制器将 `NodeReady` 状况更新为 `ConditionUnknown` 。
+- 如果节点仍然无法访问：对于不可达节点上的所有 Pod触发 [API-发起的逐出](https://kubernetes.io/zh/docs/concepts/scheduling-eviction/api-eviction/)。 默认情况下，节点控制器 在将节点标记为 `ConditionUnknown` 后等待 5 分钟 提交第一个驱逐请求。
+
+节点控制器每隔 `--node-monitor-period` 秒检查每个节点的状态。
+
+### 逐出速率限制 
+
+大部分情况下，节点控制器把逐出速率限制在每秒 `--node-eviction-rate` 个（默认为 0.1）。 这表示它每 10 秒钟内至多从一个节点驱逐 Pod。
+
+当一个可用区域（Availability Zone）中的节点变为不健康时，节点的驱逐行为将发生改变。 节点控制器会同时检查可用区域中不健康（NodeReady 状况为 `ConditionUnknown` 或 `ConditionFalse`） 的节点的百分比：
+
+- 如果不健康节点的比例超过 `--unhealthy-zone-threshold` （默认为 0.55）， 驱逐速率将会降低。
+- 如果集群较小（意即小于等于 `--large-cluster-size-threshold` 个节点 - 默认为 50），驱逐操作将会停止。
+- 否则驱逐速率将降为每秒 `--secondary-node-eviction-rate` 个（默认为 0.01）。
+
+在单个可用区域实施这些策略的原因是当一个可用区域可能从控制面脱离时其它可用区域 可能仍然保持连接。 如果你的集群没有跨越云服务商的多个可用区域，那（整个集群）就只有一个可用区域。
+
+跨多个可用区域部署你的节点的一个关键原因是当某个可用区域整体出现故障时， 工作负载可以转移到健康的可用区域。 因此，如果一个可用区域中的所有节点都不健康时，节点控制器会以正常的速率 `--node-eviction-rate` 进行驱逐操作。 在所有的可用区域都不健康（也即集群中没有健康节点）的极端情况下， 节点控制器将假设控制面与节点间的连接出了某些问题，它将停止所有驱逐动作（如果故障后部分节点重新连接， 节点控制器会从剩下不健康或者不可达节点中驱逐 `pods`）。
+
+节点控制器还负责驱逐运行在拥有 `NoExecute` 污点的节点上的 Pod， 除非这些 Pod 能够容忍此污点。 节点控制器还负责根据节点故障（例如节点不可访问或没有就绪）为其添加 [污点](https://kubernetes.io/zh/docs/concepts/scheduling-eviction/taint-and-toleration/)。 这意味着调度器不会将 Pod 调度到不健康的节点上。
+
+### 资源容量跟踪 
+
+Node 对象会跟踪节点上资源的容量（例如可用内存和 CPU 数量）。 通过[自注册](https://kubernetes.io/zh/docs/concepts/architecture/nodes/#self-registration-of-nodes)机制生成的 Node 对象会在注册期间报告自身容量。 如果你[手动](https://kubernetes.io/zh/docs/concepts/architecture/nodes/#manual-node-administration)添加了 Node，你就需要在添加节点时 手动设置节点容量。
+
+Kubernetes [调度器](https://kubernetes.io/docs/reference/generated/kube-scheduler/)保证节点上 有足够的资源供其上的所有 Pod 使用。它会检查节点上所有容器的请求的总和不会超过节点的容量。 总的请求包括由 kubelet 启动的所有容器，但不包括由容器运行时直接启动的容器， 也不包括不受 `kubelet` 控制的其他进程。
+
+**说明：** 如果要为非 Pod 进程显式保留资源。请参考 [为系统守护进程预留资源](https://kubernetes.io/zh/docs/tasks/administer-cluster/reserve-compute-resources/#system-reserved)。
+
+## 节点拓扑 
+
+**FEATURE STATE:** `Kubernetes v1.16 [alpha]`
+
+如果启用了 `TopologyManager` [特性门控](https://kubernetes.io/zh/docs/reference/command-line-tools-reference/feature-gates/)， `kubelet` 可以在作出资源分配决策时使用拓扑提示。 参考[控制节点上拓扑管理策略](https://kubernetes.io/zh/docs/tasks/administer-cluster/topology-manager/) 了解详细信息。
+
+## 节点体面关闭
+
+**FEATURE STATE:** `Kubernetes v1.21 [beta]`
+
+kubelet 会尝试检测节点系统关闭事件并终止在节点上运行的 Pods。
+
+在节点终止期间，kubelet 保证 Pod 遵从常规的 [Pod 终止流程](https://kubernetes.io/zh/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination)。
+
+体面节点关闭特性依赖于 systemd，因为它要利用 [systemd 抑制器锁](https://www.freedesktop.org/wiki/Software/systemd/inhibit/) 在给定的期限内延迟节点关闭。
+
+体面节点关闭特性受 `GracefulNodeShutdown` [特性门控](https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/) 控制，在 1.21 版本中是默认启用的。
+
+注意，默认情况下，下面描述的两个配置选项，`ShutdownGracePeriod` 和 `ShutdownGracePeriodCriticalPods` 都是被设置为 0 的，因此不会激活 体面节点关闭功能。 要激活此功能特性，这两个 kubelet 配置选项要适当配置，并设置为非零值。
+
+在体面关闭节点过程中，kubelet 分两个阶段来终止 Pods：
+
+1. 终止在节点上运行的常规 Pod。
+2. 终止在节点上运行的[关键 Pod](https://kubernetes.io/zh/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/#marking-pod-as-critical)。
+
+节点体面关闭的特性对应两个 [`KubeletConfiguration`](https://kubernetes.io/zh/docs/tasks/administer-cluster/kubelet-config-file/) 选项：
+
+- ```
+  ShutdownGracePeriod
+  ```
+
+  ：
+
+  - 指定节点应延迟关闭的总持续时间。此时间是 Pod 体面终止的时间总和，不区分常规 Pod 还是 [关键 Pod](https://kubernetes.io/zh/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/#marking-pod-as-critical)。
+
+- ```
+  ShutdownGracePeriodCriticalPods
+  ```
+
+  ：
+
+  - 在节点关闭期间指定用于终止 [关键 Pod](https://kubernetes.io/zh/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/#marking-pod-as-critical) 的持续时间。该值应小于 `ShutdownGracePeriod`。
+
+例如，如果设置了 `ShutdownGracePeriod=30s` 和 `ShutdownGracePeriodCriticalPods=10s`， 则 kubelet 将延迟 30 秒关闭节点。 在关闭期间，将保留前 20（30 - 10）秒用于体面终止常规 Pod， 而保留最后 10 秒用于终止 [关键 Pod](https://kubernetes.io/zh/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/#marking-pod-as-critical)。
+
+**说明：**
+
+当 Pod 在正常节点关闭期间被驱逐时，它们会被标记为 `failed`。 运行 `kubectl get pods` 将被驱逐的 pod 的状态显示为 `Shutdown`。 并且 `kubectl describe pod` 表示 pod 因节点关闭而被驱逐：
+
+```
+Status:         Failed
+Reason:         Shutdown
+Message:        Node is shutting, evicting pods
+```
+
+`Failed` 的 pod 对象将被保留，直到被明确删除或 [由 GC 清理](https://kubernetes.io/zh/docs/concepts/workloads/pods/pod-lifecycle/#pod-garbage-collection)。 与突然的节点终止相比这是一种行为变化。
+
+## 交换内存管理
+
+**FEATURE STATE:** `Kubernetes v1.22 [alpha]`
+
+在 Kubernetes 1.22 之前，节点不支持使用交换内存，并且 默认情况下，如果在节点上检测到交换内存配置，kubelet 将无法启动。 在 1.22 以后，可以在每个节点的基础上启用交换内存支持。
+
+要在节点上启用交换内存，必须启用kubelet 的 `NodeSwap` 特性门控， 同时使用 `--fail-swap-on` 命令行参数或者将 `failSwapOn` [配置](https://kubernetes.io/zh/docs/reference/config-api/kubelet-config.v1beta1/#kubelet-config-k8s-io-v1beta1-KubeletConfiguration) 设置为false。
+
+用户还可以选择配置 `memorySwap.swapBehavior` 以指定节点使用交换内存的方式。 例如:
+
+```yaml
+memorySwap:
+  swapBehavior: LimitedSwap
+```
+
+已有的 `swapBehavior` 的配置选项有：
+
+- `LimitedSwap`：Kubernetes 工作负载的交换内存会受限制。 不受 Kubernetes 管理的节点上的工作负载仍然可以交换。
+- `UnlimitedSwap`：Kubernetes 工作负载可以使用尽可能多的交换内存 请求，一直到系统限制。
+
+如果启用了特性门控但是未指定 `memorySwap` 的配置，默认情况下 kubelet 将使用 `LimitedSwap` 设置。
+
+`LimitedSwap` 设置的行为还取决于节点运行的是 v1 还是 v2 的控制组（也就是 `cgroups`）：
+
+- **cgroupsv1:** Kubernetes 工作负载可以使用内存和 交换，达到 pod 的内存限制（如果设置）。
+- **cgroupsv2:** Kubernetes 工作负载不能使用交换内存。
+
+如需更多信息以及协助测试和提供反馈，请 参见 [KEP-2400](https://github.com/kubernetes/enhancements/issues/2400) 及其 [设计方案](https://github.com/kubernetes/enhancements/blob/master/keps/sig-node/2400-node-swap/README.md)。
