@@ -33,7 +33,7 @@ https://www.openfaas.com/blog/edge-actions/
 
 在这篇文章中，我将向你展示使用faasd和GitHub Actions构建和运送函数到你的边缘节点是什么样子。
 
-![faasd-conceptual](C:\Users\文茶君\Desktop\faasd-conceptual.png)
+![faasd-conceptual](F:\docs\docs\images\faasd-conceptual.png)
 
 > 概念图 边缘的OpenFaaS，由GitHub Actions管理
 
