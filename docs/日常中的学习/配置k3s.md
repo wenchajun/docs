@@ -51,8 +51,8 @@ $ echo \
 
 # 官方源
 # $ echo \
-#   "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \
-#   $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+  "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \
+   $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 ```
 
 
@@ -78,7 +78,7 @@ $ sudo apt-get install docker-ce docker-ce-cli containerd.io
 > 若你想安装测试版的 Docker, 请从 test.docker.com 获取脚本
 
 ```
- $ curl -fsSL test.docker.com -o get-docker.sh
+ $ curl -fsSL test.docker.com -o get-docker.sh//测试版
 $ curl -fsSL get.docker.com -o get-docker.sh
 $ sudo sh get-docker.sh --mirror Aliyun
 # $ sudo sh get-docker.sh --mirror AzureChinaCloud
