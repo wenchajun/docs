@@ -75,6 +75,23 @@ snail    Ready    edge                   22h   v1.22.2+k3s2   beta.kubernetes.io
 salmon   Ready    control-plane,master   22h   v1.22.2+k3s2   beta.kubernetes.io/arch=amd64,beta.kubernetes.io/instance-type=k3s,beta.kubernetes.io/os=linux,kubernetes.io/arch=amd64,kubernetes.io/hostname=salmon,kubernetes.io/os=linux,node-role.kubernetes.io/control-plane=true,node-role.kubernetes.io/master=true,node.kubernetes.io/instance-type=k3s
 ```
 
+安装openfunction
+
+```
+     wget https://raw.githubusercontent.com/OpenFunction/OpenFunction/main/hack/deploy.sh
+     ls
+     chmod +x deploy.sh 
+     ./deploy.sh --all
+     kubectl get pods -A
+     kubectl create -f https://github.com/OpenFunction/OpenFunction/releases/download/v0.4.0/bundle.yaml
+     kubectl create -f https://raw.githubusercontent.com/OpenFunction/OpenFunction/main/config/bundle.yaml
+
+```
+
+
+
+
+
 ### 安装 Mosquitto
 
 在 snail（边缘节点）上创建两个目录：
