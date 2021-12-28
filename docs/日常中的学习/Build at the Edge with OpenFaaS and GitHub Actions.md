@@ -18,7 +18,7 @@ https://www.openfaas.com/blog/edge-actions/
 
 > K3s为Kubernetes做了什么，faasd为函数做了什么。
 
-![devices](F:\docs\docs\images\devices.jpg)
+![devices](https://github.com/wenchajun/docs/blob/master/docs/images/devices.jpg)
 
 > Pictured: Intel NUC, Bitscope Edge Rack and 6x RPi 4, Turing Pi, Compute Module Carrier with NVMe, PoE Cluster Blade.
 
@@ -33,7 +33,7 @@ https://www.openfaas.com/blog/edge-actions/
 
 在这篇文章中，我将向你展示使用faasd和GitHub Actions构建和运送函数到你的边缘节点是什么样子。
 
-![faasd-conceptual](F:\docs\docs\images\faasd-conceptual.png)
+![faasd-conceptual](https://github.com/wenchajun/docs/blob/master/docs/images/faasd-conceptual.png)
 
 > 概念图 边缘的OpenFaaS，由GitHub Actions管理
 
@@ -143,7 +143,7 @@ sudo systemctl start inlets.service
 
 现在你可以在任何地方使用其认证的公共HTTPS URL访问你的OpenFaaS用户界面。
 
-![portal-ui](F:\docs\docs\images\portal-ui.png)
+![portal-ui](https://github.com/wenchajun/docs/blob/master/docs/images/portal-ui.png)
 
 创建一个函数来处理仓库中的webhooks
 
@@ -373,7 +373,7 @@ git push origin master
 
 然后重新启动作业，或将另一个更改推送到仓库。
 
-![fixed](F:\docs\docs\images\fixed.png)
+![fixed](https://github.com/wenchajun/docs/blob/master/docs/images/fixed.png)
 
 > 构建失败几次并不丢人。一旦它能正常运行，它通常能够在一分钟内构建、发布和部署你的函数。
 
@@ -395,7 +395,7 @@ curl -sL https://edge.example.com/function/repo-events
 
 关于一个用Go编写的GitHub机器人的例子，请查看[Derek](https://github.com/alexellis/derek)。
 
-![docker commenting](F:\docs\docs\images\docker commenting.png)
+![docker commenting](https://github.com/wenchajun/docs/blob/master/docs/images/fixed.png)
 
 > Derek commenting on PRs
 

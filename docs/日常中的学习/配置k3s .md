@@ -22,6 +22,14 @@ or
 curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=latest sh -
 ```
 
+在这里引入了环境变量,该配置会将config放到k8s中config的默认配置
+
+```
+export INSTALL_K3S_EXEC="--write-kubeconfig ~/.kube/config"
+```
+
+
+
 ```
 curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.20.11+k3s2 K3S_NODE_NAME=Openfunction sh -
 ```
@@ -41,13 +49,13 @@ token 位于 **/var/lib/rancher/k3s/server/node-token**
 ### Agent
 
 ```shell
-curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=latest K3S_NODE_NAME=snail K3S_URL=https://192.168.0.3:6443 K3S_TOKEN="K1082a8791bcc047244066d43dc609187f868621c1e3ad733687e6e879dbd07265b::server:d9107bd6e14855ce77051659fdc2b57d" sh -
+curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=latest K3S_NODE_NAME=snail K3S_URL=https://192.168.0.3:6443 K3S_TOKEN="K102af05b2674156ae810fb474d7dca3bbd5fd7c4605ed5e817c2c618af1980e352::server:395b928545d56bc869db82b4d06bce1b" sh -
 ```
 
 ```
 curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.20.11+k3s2 K3S_NODE_NAME=raspberrypi \
 K3S_URL=https://192.168.1.5:6443 \
-K3S_TOKEN="K1020826e691fb76ecc29b4d0c6794311abb4fd78642b6aac01716011f810c39217::server:6f9ce7731b4b0b64236094779345b130"  sh -
+K3S_TOKEN="K102af05b2674156ae810fb474d7dca3bbd5fd7c4605ed5e817c2c618af1980e352::server:395b928545d56bc869db82b4d06bce1b"  sh -
 ```
 
 
