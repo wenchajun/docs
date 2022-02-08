@@ -25,7 +25,7 @@ curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=latest sh -
 在这里引入了环境变量,该配置会将config放到k8s中config的默认配置
 
 ```
-export INSTALL_K3S_EXEC="--write-kubeconfig ~/.kube/config"
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable=traefik --write-kubeconfig ~/.kube/config" INSTALL_K3S_VERSION=v1.20.11+k3s2 K3S_NODE_NAME=Openfunction  sh -s -
 ```
 
 
@@ -55,7 +55,7 @@ curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=latest K3S_NODE_NAME=snail K3
 ```
 curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.20.11+k3s2 K3S_NODE_NAME=raspberrypi \
 K3S_URL=https://192.168.1.5:6443 \
-K3S_TOKEN="K102af05b2674156ae810fb474d7dca3bbd5fd7c4605ed5e817c2c618af1980e352::server:395b928545d56bc869db82b4d06bce1b"  sh -
+K3S_TOKEN="K1013a3603ddd28ad7a52e665000fdd46850e21abbe7eb61143e424cc18f12a8a44::server:baa6ce02043596b79f24a165dbacb436"  sh -
 ```
 
 

@@ -20,6 +20,10 @@ export INSTALL_K3S_VERSION=v1.20.11+k3s2
 export K3S_NODE_NAME=Openfunction
 ```
 
+```
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable=traefik --write-kubeconfig ~/.kube/config" INSTALL_K3S_VERSION=v1.20.11+k3s2 K3S_NODE_NAME=Openfunction  sh -s -
+```
+
 
 
 ```
@@ -85,7 +89,7 @@ wget -c  https://github.com/OpenFunction/cli/releases/download/v0.5.1/ofn_linux_
 
 
 
-
+安装openfunction
 
 
 
@@ -110,4 +114,39 @@ kubectl apply -f https://raw.githubusercontent.com/argoproj/argo-events/stable/m
 # Install with a validating admission controller
 kubectl apply -f https://raw.githubusercontent.com/argoproj/argo-events/stable/manifests/install-validating-webhook.yaml
 ```
+
+本次实验中安装了
+
+```yaml
+
+kubectl create namespace argo-events
+ kubectl apply -n argo-events -f https://raw.githubusercontent.com/argoproj/argo-events/v1.5.4/manifests/install.yaml
+ kubectl apply -n argo-events -f https://raw.githubusercontent.com/argoproj/argo-events/v1.5.4/manifests/install-validating-webhook.yaml
+ kubectl get pods -n  argo-events
+  kubectl apply -n argo-events -f https://raw.githubusercontent.com/argoproj/argo-events/v1.5.4/examples/eventbus/native.yaml
+ kubectl get pods -n  argo-events
+
+
+```
+
+https://argoproj.github.io/argo-events/eventsources/setup/github/
+
+```
+apiVersion: v1
+kind: Secret
+metadata:
+  name: github-access
+type: Opaque
+data:
+  token: <base64-encoded-api-token-from-previous-step>
+  secret: <base64-encoded-webhook-secret-key>
+```
+
+
+
+```
+kubectl -n argo-events apply -f github-access.yaml
+```
+
+
 
