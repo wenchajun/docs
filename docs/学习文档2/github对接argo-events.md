@@ -290,7 +290,7 @@ kubectl apply -n argo-events -f <event-source-file-updated-in-previous-step>
 
 第八步，转到`Webhooks`GitHub 上的项目设置下并验证 webhook 是否已注册。您也可以通过查看事件源 pod 日志来执行相同操作。
 
-![image-20220208155419248](docs\images\github-action.png)
+![image-20220208155419248](https://github.com/wenchajun/docs/blob/master/docs/images/github-action.png?raw=true)
 
 至此github-Action已经对接到主机端的openfunction客户端
 
